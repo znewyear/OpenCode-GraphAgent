@@ -179,15 +179,24 @@ existing issue (`Fixes #N`). Curated DAG configs are owned by the `opencode-dag-
 <!-- specgit:block:start -->
 ## SpecGit delivery harness
 
-Managed by `specgit init`. Everything between the markers is rewritten on
-re-init; keep manual guidance outside them.
+Managed by `specgit init`. Everything between the markers is regenerated
+whenever init writes the harness (a fresh init, or `--force` when a policy
+already exists); keep manual guidance outside them.
 
 ### The delivery story
 
 - Start with `specgit issue <title-or-number>...`: it creates or reuses
-  the issues, branches, opens the draft pull request that closes every
-  bound issue, and writes `.specgit.yaml`. Re-running resumes; it is
-  idempotent.
+  the issues, branches, opens the draft pull request pre-filled with a
+  deterministic scaffold (the `Closes #n` line for every bound issue,
+  then Why / What changed / Evidence / Checklist sections), and writes
+  `.specgit.yaml`. Re-running resumes; it is idempotent.
+- Fill in the scaffold sections as you deliver. Its placeholders are
+  advisory — the closing references are the only body gate. The PR body
+  is written once at creation; no SpecGit command edits an existing PR
+  body, and the repository's own pull-request template is never read.
+- A draft pull request always fails the verdict (`pr_draft`): before
+  `specgit finish`, mark it ready for review — `gh pr ready <number>`
+  on GitHub, `glab mr update <number> --ready` on GitLab.
 - Finish with `specgit finish`: the verdict, derived from real git, PR,
   and CI evidence. Exit code 0 is the only "done".
 
@@ -199,6 +208,15 @@ re-init; keep manual guidance outside them.
 - `specgit status` shows local evidence only: record, state, drift,
   origin. `specgit doctor` probes git, repository, origin, gh, and
   policy.
+
+### The command surface
+
+- Ten commands: `specgit init`, `specgit setup`, `specgit issue`,
+  `specgit pr`, `specgit finish`, `specgit bind`, `specgit unbind`,
+  `specgit status`, `specgit accept`, `specgit doctor`.
+- `specgit setup` installs the agent entry points (commands for opencode,
+  portable skills for other tools); `specgit bind`, `specgit unbind`,
+  and `specgit accept` are automation aliases for scripts and CI.
 
 ### Before creating an issue, check for duplicates
 
@@ -225,4 +243,26 @@ verified on its own evidence, split it before binding.
 - Never weaken `spec_git/policy.yaml` to make a verdict pass.
 - `--json` is the only parse surface: stdout is exactly one JSON
   document; never scrape human-readable output.
+
+### Agent contract essentials
+
+- **SpecGit is the default way of working here.** Any non-trivial
+  task — a feature, a fix, a refactor, a docs change — is a delivery:
+  work items live in this tracker as issues, never in private task
+  lists or conversational checklists. Before starting, turn the work
+  into issue(s) (`specgit issue <type>: <title>...`); mid-conversation
+  inventories ("let me list everything to do") become issues, not
+  chat artifacts. Trivial replies and read-only questions need none
+  of this.
+- The one rule: a delivery is done if and only if `specgit finish`
+  exits `0`. Never declare completion from task lists, file states, or
+  test runs you performed yourself.
+- Branch on exit codes, not phrasing: `1` = evidence complete, fix what
+  the gates named; `3` = evidence missing, fix the environment first
+  (`specgit doctor`). Never present exit `3` as success.
+- Keep the `Closes #n` references in the PR body intact; after changing
+  the PR body, head branch, or CI, re-run `specgit finish`. Never
+  bypass or reconfig a required check to make acceptance pass.
+- Forge evidence flows through the user's authenticated CLI session only
+  (`gh` / `glab`): never read, log, or pass around tokens.
 <!-- specgit:block:end -->
