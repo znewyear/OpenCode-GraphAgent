@@ -20,6 +20,7 @@ import { Global } from "@opencode-ai/core/global"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { FetchHttpClient } from "effect/unstable/http"
 import { SettingsHook, type HookPayload } from "@/hook/settings"
+import { Question } from "@/question"
 import { SessionHooks } from "@/hook/session-hooks"
 import { InstanceBootstrap } from "@/project/bootstrap"
 import { Worktree } from "@/worktree"
@@ -226,6 +227,102 @@ describe("Notification trigger on permission ask", () => {
         yield* permission.reply({ requestID: item.id, reply: "reject" })
       }
       yield* Fiber.await(fiber)
+    }),
+  )
+})
+
+// ── 4.8 QuestionAsked fires on Question.ask, never blocking it ──
+
+const questionRecorder = makeRecorder()
+// Recorder merged as a SIBLING (not Layer.provide): Question resolves
+// SettingsHook lazily via serviceOption at ask() time, so it must be visible
+// in the final runtime context, not just at Question.layer construction.
+const questionEnv = Layer.mergeAll(
+  Question.layer.pipe(Layer.provideMerge(EventV2Bridge.defaultLayer)),
+  questionRecorder.layer,
+)
+
+const questionIt = testEffect(questionEnv)
+
+describe("QuestionAsked trigger on Question.ask", () => {
+  questionIt.instance(
+    "fires with questions/prompt/title while the ask stays answerable",
+    () =>
+      Effect.gen(function* () {
+        const question = yield* Question.Service
+        const fiber = yield* question
+          .ask({
+            sessionID: SessionID.make("ses_qa_wiring"),
+            questions: [
+              {
+                question: "Pick one",
+                header: "Choice",
+                options: [
+                  { label: "A", description: "first" },
+                  { label: "B", description: "second" },
+                ],
+              },
+            ],
+          })
+          .pipe(Effect.forkScoped)
+
+        yield* pollWithTimeout(
+          Effect.sync(() =>
+            questionRecorder.recorded.some((p) => p.event === "QuestionAsked") ? (true as const) : undefined,
+          ),
+          "QuestionAsked hook never fired",
+          "5 seconds",
+        )
+        const events = questionRecorder.recorded.filter(
+          (p): p is Extract<HookPayload, { event: "QuestionAsked" }> => p.event === "QuestionAsked",
+        )
+        expect(events).toHaveLength(1)
+        expect(events[0].prompt).toBe("Pick one")
+        expect(events[0].title).toBe("Choice")
+        expect(events[0].questions).toHaveLength(1)
+
+        // The ask surfaced and is answerable — the hook did not block it.
+        const pending = yield* question.list()
+        expect(pending).toHaveLength(1)
+        yield* question.reply({ requestID: pending[0].id, answers: [["A"]] })
+        expect(yield* Fiber.join(fiber)).toEqual([["A"]])
+      }),
+  )
+})
+
+// Sibling layer env: serviceOption resolves SettingsHook at call time, so a
+// mergeAll sibling (not a construction-time provide) is what ask sees.
+const dyingQuestionEnv = Layer.mergeAll(
+  Question.layer.pipe(Layer.provideMerge(EventV2Bridge.defaultLayer)),
+  Layer.succeed(
+    SettingsHook.Service,
+    SettingsHook.Service.of({
+      trigger: () => Effect.die(new Error("QuestionAsked hook boom")),
+      list: () => Effect.succeed([]),
+    }),
+  ),
+)
+const dyingQuestionIt = testEffect(dyingQuestionEnv)
+
+describe("QuestionAsked survives a dying hook", () => {
+  dyingQuestionIt.instance("ask still surfaces and returns answers", () =>
+    Effect.gen(function* () {
+      const question = yield* Question.Service
+      const fiber = yield* question
+        .ask({
+          sessionID: SessionID.make("ses_qa_dying"),
+          questions: [{ question: "Still there?", header: "Check", options: [{ label: "Yes", description: "" }] }],
+        })
+        .pipe(Effect.forkScoped)
+
+      // The hook died but the ask still surfaced as pending and answerable.
+      const pending = yield* pollWithTimeout(
+        question.list().pipe(Effect.map((items) => (items.length === 1 ? items : undefined))),
+        "ask never became pending despite dying hook",
+        "5 seconds",
+      )
+      yield* question.reply({ requestID: pending[0].id, answers: [["Yes"]] })
+      expect(yield* Fiber.join(fiber)).toEqual([["Yes"]])
     }),
   )
 })

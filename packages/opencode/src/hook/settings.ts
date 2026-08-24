@@ -44,12 +44,11 @@ import { spawn } from "child_process"
 import { createHash } from "crypto"
 import { Effect, Layer, Context, Option, Scope, Exit } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
+import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import z from "zod"
 import { generateObject, generateText, type ModelMessage } from "ai"
 import { FSUtil } from "@opencode-ai/core/fs-util"
-import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import * as Log from "@/util/log"
 import { Global } from "@opencode-ai/core/global"
 import { InstanceState } from "@/effect/instance-state"
@@ -91,6 +90,7 @@ export type HookEvent =
   | "TaskCompleted"
   | "Elicitation"
   | "ElicitationResult"
+  | "QuestionAsked"
   | "ConfigChange"
   | "WorktreeCreate"
   | "WorktreeRemove"
@@ -120,6 +120,7 @@ export const VALID_HOOK_EVENTS = new Set<string>([
   "TaskCompleted",
   "Elicitation",
   "ElicitationResult",
+  "QuestionAsked",
   "ConfigChange",
   "WorktreeCreate",
   "WorktreeRemove",
@@ -438,6 +439,13 @@ export type HookPayload =
   | { event: "TaskCompleted"; taskID?: string; taskTitle?: string; result?: unknown }
   | { event: "Elicitation"; prompt?: string; schema?: unknown }
   | { event: "ElicitationResult"; result?: unknown; cancelled?: boolean }
+  | {
+      /** Fork addition: fires from Question.ask when the model asks the user a question. */
+      event: "QuestionAsked"
+      questions?: ReadonlyArray<unknown>
+      prompt?: string
+      title?: string
+    }
   | { event: "ConfigChange"; configPath?: string; changes?: unknown }
   | { event: "WorktreeCreate"; path?: string; branch?: string }
   | { event: "WorktreeRemove"; path?: string; branch?: string }
@@ -650,6 +658,23 @@ function matches(matcher: string | undefined, target: string): boolean {
 
 // ── Settings loader (hooks.json chain) ──────────────────────────
 
+// Type guards — the only lint-clean way to narrow JSON-decoded `any`/string
+// values into typed structures (oxlint no-unsafe-type-assertion rejects every
+// `as T` narrowing, including `as unknown as T`).
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+function isHookEvent(k: string): k is HookEvent {
+  return VALID_HOOK_EVENTS.has(k)
+}
+
+function isHookJSONOutput(v: unknown): v is HookJSONOutput {
+  // Loose flat schema mirrors HookJSONOutput (all fields optional, non-strict):
+  // safeParse succeeds for any plain object, rejecting arrays/primitives/null.
+  return HookJSONOutputZodSchema.safeParse(v).success
+}
+
 // Exported for unit testing only; not part of the public surface.
 export function readJSON(filepath: string): Settings | null {
   if (!existsSync(filepath)) return null
@@ -657,21 +682,16 @@ export function readJSON(filepath: string): Settings | null {
     const parsed = JSON.parse(readFileSync(filepath, "utf8"))
     // hooks.json uses top-level event keys; a legacy {"hooks": {...}} wrapper is
     // tolerated (D1 graceful degradation). The wrapper wins when present.
-    const obj =
-      parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? (parsed as Record<string, unknown>)
-        : undefined
-    const rawHooks = obj && obj.hooks && typeof obj.hooks === "object" && !Array.isArray(obj.hooks)
-      ? obj.hooks as Record<string, unknown>
-      : obj
-    
+    const obj = isRecord(parsed) ? parsed : undefined
+    const rawHooks = obj && isRecord(obj.hooks) ? obj.hooks : obj
+
     // Filter to only valid HookEvent keys with array values (defends against
     // non-event keys like "$schema" being treated as matchers)
     const hooks: Settings["hooks"] = {}
-    if (rawHooks && typeof rawHooks === "object") {
+    if (rawHooks) {
       for (const [key, value] of Object.entries(rawHooks)) {
-        if (VALID_HOOK_EVENTS.has(key) && Array.isArray(value)) {
-          hooks[key as HookEvent] = value
+        if (isHookEvent(key) && Array.isArray(value)) {
+          hooks[key] = value
         }
       }
     }
@@ -720,8 +740,8 @@ export function mergeSettings(layers: Settings[]): Settings {
   for (const layer of layers) {
     if (!layer.hooks) continue
     for (const [event, matchers] of Object.entries(layer.hooks)) {
-      const ev = event as HookEvent
-      const acc = (out.hooks![ev] ??= [])
+      if (!isHookEvent(event)) continue
+      const acc = (out.hooks![event] ??= [])
       acc.push(...(matchers ?? []))
     }
   }
@@ -806,10 +826,11 @@ function readChain(
     layers.push(data)
     if (!data.hooks) continue
     for (const [event, matchers] of Object.entries(data.hooks)) {
+      if (!isHookEvent(event)) continue
       for (const m of matchers ?? []) {
         for (const h of m.hooks ?? []) {
           summaries.push({
-            event: event as HookEvent,
+            event,
             scope,
             type: h.type,
             descriptor: descriptorFor(h),
@@ -908,13 +929,7 @@ function deprecatedSettingsPaths(opencodeGlobal: string, directory: string, work
 function hasHooksField(filepath: string): boolean {
   try {
     const parsed = JSON.parse(readFileSync(filepath, "utf8"))
-    return (
-      parsed !== null &&
-      typeof parsed === "object" &&
-      !Array.isArray(parsed) &&
-      "hooks" in parsed &&
-      Boolean((parsed as { hooks?: unknown }).hooks)
-    )
+    return isRecord(parsed) && "hooks" in parsed && Boolean(parsed.hooks)
   } catch {
     return false
   }
@@ -1102,11 +1117,13 @@ function parseStdout(stdout: string, command: string): HookJSONOutput | undefine
     return undefined
   }
   try {
-    return JSON.parse(trimmed) as HookJSONOutput
+    const parsed: unknown = JSON.parse(trimmed)
+    if (isHookJSONOutput(parsed)) return parsed
   } catch {
-    log.warn("hook returned invalid JSON", { command, output: trimmed.slice(0, 200) })
-    return undefined
+    // fall through to the shared warn below
   }
+  log.warn("hook returned invalid JSON", { command, output: trimmed.slice(0, 200) })
+  return undefined
 }
 
 // ── Payload → stdin envelope ────────────────────────────────────
@@ -1259,6 +1276,13 @@ function buildStdinEnvelope(payload: HookPayload, ctx: TriggerContext, cwd: stri
         ...(payload.result !== undefined ? { result: payload.result } : {}),
         ...(payload.cancelled !== undefined ? { cancelled: payload.cancelled } : {}),
       }
+    case "QuestionAsked":
+      return {
+        ...base,
+        ...(payload.questions !== undefined ? { questions: payload.questions } : {}),
+        ...(payload.prompt !== undefined ? { prompt: payload.prompt } : {}),
+        ...(payload.title !== undefined ? { title: payload.title } : {}),
+      }
     case "ConfigChange":
       return {
         ...base,
@@ -1290,6 +1314,10 @@ function buildStdinEnvelope(payload: HookPayload, ctx: TriggerContext, cwd: stri
         ...(payload.path !== undefined ? { path: payload.path } : {}),
         ...(payload.changeType !== undefined ? { change_type: payload.changeType } : {}),
       }
+    default:
+      // Defensive: switch is exhaustive over the HookEvent union; this branch is
+      // unreachable today but keeps consistent-return satisfied for future events.
+      return base
   }
 }
 
@@ -1639,8 +1667,7 @@ const agentHandler: HookHandler = {
                 toolChoice: "auto",
                 abortSignal: ac.signal,
                 maxOutputTokens: 4096,
-                allowSystemInMessages: true,
-              } as any)
+              })
               if (captured.value) return captured.value
               messages.push(...result.response.messages)
               if (
@@ -1827,7 +1854,7 @@ export const layer = Layer.effect(
           exitCode: undefined as number | null | undefined,
         }
       }
-      return yield* handler.run(entry as never, envelope, cwd, inHook)
+      return yield* handler.run(entry, envelope, cwd, inHook)
     })
 
     // Background scope for async hooks. Lives as long as the SettingsHook service
@@ -2190,7 +2217,7 @@ export const layer = Layer.effect(
 
 // Only provide deps needed at layer construction (SessionHooks — the sole
 // service yielded in the layer body). Handler deps (MCP/Provider/Auth/FSUtil/
-// HttpClient/CrossSpawnSpawner/HookRewake) are resolved lazily at trigger time
+// HttpClient/HookRewake) are resolved lazily at trigger time
 // from whatever ambient context the Effect runs in.
 export const defaultLayer = layer.pipe(
   Layer.provide(SessionHooks.defaultLayer),
@@ -2252,22 +2279,23 @@ function invokeMcpHook(
 
     const result = yield* Effect.promise(() =>
       Promise.resolve(
-        tool.execute!(envelope as never, {
+        tool.execute!(envelope, {
           toolCallId: `hook-${Date.now()}`,
           messages: [],
           abortSignal: new AbortController().signal,
-        } as never),
+        }),
       ).catch((err) => {
         log.warn("mcp hook execution threw", { command, error: String(err) })
         return undefined
       }),
     )
 
-    if (!result || typeof result !== "object" || !("content" in result)) return undefined
+    if (!isRecord(result) || !Array.isArray(result.content)) return undefined
 
-    const content = (result as { content: Array<{ type: string; text?: string }> }).content
-    const firstText = content.find((c) => c.type === "text" && typeof c.text === "string")?.text
-    if (!firstText) return undefined
+    const firstText = result.content.find(
+      (c) => isRecord(c) && c.type === "text" && typeof c.text === "string",
+    )?.text
+    if (typeof firstText !== "string") return undefined
 
     return parseStdout(firstText, command)
   })

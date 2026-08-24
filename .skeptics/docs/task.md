@@ -33,6 +33,11 @@
 | P007 | T503 集成+回归验证 | opencodeg-update 主更新成功后调用 opencodeg-sync-dag（失败不阻断）；真实运行更新到 1.0.26-opencodeg；验证版本号/数据保留/模板同步/依赖处理 | 修改 | P1 | ⭐⭐ | 2026-08-19 | 2026-08-19 | ✅已完成 | ✅ | T503a 集成（⑥.5 ⑥.5 段 command -v + 失败不阻断）；T503b 真实更新 1.0.25→1.0.26-opencodeg ✅ rebase 1 提交→bun.lock 无变化跳过→构建 7 分钟→DAG 同步 15 一致+1 更新；bun.lock 构建污染已恢复，stash 已还原 |
 | P008 | T601 命令名提示动态化 | 全部面向用户的命令名提示用 basename(process.execPath) 替换硬编码 opencode：splash.ts:237(恢复会话)/error.ts:67,105/acp/service.ts:94,102/provider/error.ts:61/provider.ts:786,872 | 修改 | P0 | ⭐⭐ | 2026-08-19 | 2026-08-19 | ✅已完成 | ✅ | 8 处 5 文件全改；新增 src/command-name.ts（module shape 合规）；新增/整合 5 个测试文件（15 用例/0 失败）；三重 Loop 通过（Reviewer PASS→Tester PASS→Approval 1 轮修正后 PASS）；红线零触碰（provider ID/uninstall/upgrade/注释）；typecheck REAL_EXIT=0 |
 | P008 | T602 重建重装验证 | 重建 opencodeg（构建约7-12分钟）→ 重装 ~/.local/bin/opencodeg → 退出 TUI 验证恢复提示显示 opencodeg --mini -s ...；回归 models/基本命令；**含 pr.ts:83/104 功能性 spawn 改用 process.execPath 修复（Approval 批注强制项）** | 构建 | P0 | ⭐⭐ | 2026-08-19 | | ⬜未开始 | ❌ | 依赖 T601；会动真实二进制（用户已授权）；验证 provider.ts 硬编码 strings 扫描 + 手动触发 |
+| P009 | T701 opencodeg-update 同步改造（Slice A） | rebase-on-origin 改为 merge-on-upstream；12 个 PROTECTED_FILES 逐个 checkout --ours；非保护文件冲突/失败 git merge --abort exit 1 | 修改 | P0 | ⭐⭐⭐ | 2026-08-24 | 2026-08-24 | ✅已完成 | ✅ | 仓库源管理副本 script/opencodeg-update.sh 与安装副本 ~/.local/bin/opencodeg-update 字节一致 sha256=f80735…b335；merge 保本地提交无需 force-push；three-repo-update.sh 未动 |
+| P009 | T701-FIX FIX-01 trap 覆盖修复 | 安装阶段 INT/TERM trap 不再覆盖编译阶段回滚 trap | 修改 | P0 | ⭐ | 2026-08-24 | 2026-08-24 | ✅已完成 | ✅ | script L239 `trap 'rm -f "$TMP_BIN"; rollback; exit 130' INT TERM` 补回 rollback；REVIEW 裁决 REVISE 驱动 |
+| P009 | T702 notify 两级配置（Slice B-1） | resolveConfig 链 env > 项目 .opencode/notify.jsonc > 全局 ~/.config/opencodeg/notify.jsonc > legacy > 编译默认；JSONC 注释剥离 + per-channel per-field 深合并 + 解析失败降级 | 新增 | P1 | ⭐⭐ | 2026-08-24 | 2026-08-24 | ✅已完成 | ✅ | 全局 ~/.config/opencodeg/notify.jsonc 已建（全渠道开关）；项目模板 .opencode/notify.jsonc.example 已建（纯占位无密钥）；A9b 两级合并断言覆盖 |
+| P009 | T703 QuestionAsked hook 事件（Slice B-2） | settings.ts 4 处注册（HookEvent union/VALID_HOOK_EVENTS/HookPayload union/buildStdinEnvelope case）；question/index.ts Question.ask 用 Effect.serviceOption(SettingsHook.Service) 触发 | 新增 | P1 | ⭐⭐ | 2026-08-24 | 2026-08-24 | ✅已完成 | ✅ | 触发失败仅 logWarning 不阻断提问（L110-123）；dispatcher 监听 + format.ts critical 通知（项目名/标题/会话短码/描述）；elicitation 10s 窗口去重；A17 断言覆盖 |
+| P009 | T704 三重 Loop 复验 | GATES 验证 + Tester 复验 verify 20/20 + event-wiring 22/22 + typecheck 干净 + Approval 对抗审视 | 测试 | P0 | ⭐⭐ | 2026-08-24 | 2026-08-24 | ✅已完成 | ✅ | GATES 全 PASS → REVIEW REVISE（trap 缺陷+交付项）→ FIX-01 修复+指纹重算 → Tester 复验全绿 → Approval 通过 |
 
 ## 并行分组（执行记录）
 | 批次 | 任务 | 说明 | 结果 |
@@ -50,6 +55,7 @@
 | 批10 | T404 | 依赖 T401+T402 | ✅ 完成（/dag-flow 端到端返回 Workflow ID） |
 | 批11 | T405 | 依赖全部 | ✅ 完成（learned.md R12 章节沉淀） |
 | 批12 | T406 | 依赖用户 gh 认证 + 步骤 A（改 remote） | ✅ 完成（平台握手实质打通，can_push=false 已知限制，用户裁决接受现状） |
+| 批14 | T701 + T701-FIX + T702 + T703 + T704（R15） | GATES 验证 → REVIEW 裁决 → FIX-01 修复 → Tester 复验 → Approval 对抗审视 | ✅ 全绿（REVIEW REVISE→FIX-01 修复+指纹重算→Tester 20/20+22/22→Approval 通过；交付指纹 9dc85210…e69f） |
 
 ## 文件锁登记（已全部释放）
 | 任务ID | 锁定文件 | 获取时间 | 释放时间 |
@@ -248,3 +254,58 @@ R14 修复命令名提示硬编码（恢复会话 + 全部命令名提示） �
 - opencodeg 安装路径 ~/.local/bin/opencodeg → basename(process.execPath) 应返回 "opencodeg"
 - WSL2 混合环境 typecheck 注意：`bun typecheck` 因 @typescript/native-preview-win32-x64 平台包缺失失败；等价 `bun run --bun tsgo --noEmit` 前需临时移开 git-ignored dist/ 目录（stale 产物会报 TS1484）
 ```
+
+## R15 任务分解（WBS）✅ 全部完成（T701/T701-FIX/T702/T703/T704 2026-08-24，P009 100%；三重 Loop 全过）
+
+```
+R15 完善 fork 更新链路与通知配置（3 项交付 + 1 项保护） ✅ 全部完成（2026-08-24）
+├── T701 [P0 ⭐⭐⭐] opencodeg-update 同步改造（Slice A）✅ 已完成
+│     目标：fork 更新链路从 rebase-on-origin 改为 merge-on-upstream
+│     实现（script/opencodeg-update.sh，与 ~/.local/bin/opencodeg-update 字节一致）：
+│     ├─ 策略：fetch upstream --tags → rev-list 落后检查 → git merge --no-edit refs/remotes/upstream/main
+│     │       （无 rebase、无 force-push，保留本地提交）
+│     ├─ 冲突保护（1 项保护）：12 个 PROTECTED_FILES 逐个 `git checkout --ours` 保留本地定制
+│     │       非保护文件冲突/merge 提交失败 → `git merge --abort` exit 1 交人工
+│     ├─ 回滚不变：rollback() = git reset --hard OLD_HEAD（merge 前 L141 记录）
+│     └─ 测试缝：OPENCODEG_WORKDIR 覆盖仓库路径 / --check 仅比对 / OPENCODEG_SKIP_BUILD=1 演练 merge 路径
+│     验证：两副本 sha256=f80735109a5e337b5753ba2be382c815519cb5f3810155a33fb7fd9d2406b335 一致
+│     未动：three-repo-update.sh
+├── T701-FIX [P0 ⭐] FIX-01 trap 覆盖缺陷修复 ✅ 已完成
+│     目标：安装阶段 INT/TERM trap 不再覆盖编译阶段的回滚 trap
+│     根因：后注册 trap 覆盖先注册的（bash trap 替换语义）→ 安装阶段中断只 rm 临时文件不 rollback
+│     修复：script L239 `trap 'rm -f "$TMP_BIN"; rollback; exit 130' INT TERM`（补回 rollback）
+│     驱动：REVIEW 裁决 REVISE（trap 缺陷 + 交付项）→ 修复后指纹重算 9dc85210…e69f
+├── T702 [P1 ⭐⭐] notify 两级配置（Slice B-1）✅ 已完成
+│     目标：notify 钩子配置两级化（env > 项目 > 全局 > legacy > 编译默认）
+│     实现（.opencode/hooks/notify/config.ts resolveConfig 链）：
+│     ├─ 优先级：env > 项目 <cwd>/.opencode/notify.jsonc > 全局 ~/.config/opencodeg/notify.jsonc
+│     │        > legacy notify.config.json > 编译默认
+│     ├─ JSONC 注释剥离；per-channel per-field 深合并；解析失败降级（不阻断）
+│     ├─ 全局 ~/.config/opencodeg/notify.jsonc（已创建，全部渠道开关）
+│     └─ 项目模板 .opencode/notify.jsonc.example（已建，纯占位无密钥，不进指纹/A11 清单）
+│     验证：verify.ts A9b 两级合并断言通过
+└── T703 [P1 ⭐⭐] QuestionAsked hook 事件（Slice B-2）✅ 已完成
+      目标：模型向用户提问时触发 QuestionAsked hook 事件
+      实现：
+      ├─ settings.ts 4 处注册：HookEvent union L94 / VALID_HOOK_EVENTS L124
+      │        / HookPayload union L445（questions/prompt/title 字段）/ buildStdinEnvelope case L1271
+      ├─ question/index.ts Question.ask：Effect.serviceOption(SettingsHook.Service) 惰性解析
+      │        触发失败仅 logWarning 不阻断提问（L110-123）
+      ├─ dispatcher 监听 QuestionAsked；format.ts 输出 critical 通知
+      │        （项目名 basename(cwd) / 标题 / 会话 id 短码 / 描述）
+      └─ elicitation 10s 窗口去重；SDK 再生成（sdk.gen.ts/types.gen.ts）
+      验证：verify.ts A17 字段+去重断言；event-wiring 集成测试 22/22（含 dying hook 不阻断）
+追加 T704 [P0 ⭐⭐] 三重 Loop 复验 ✅ 已完成
+      链：GATES 验证全 PASS → REVIEW 裁决 REVISE（trap 缺陷+交付项）→ FIX-01 修复+指纹重算
+          → Tester 复验 verify 20/20 + event-wiring 22/22 → Approval 对抗审视通过
+      typecheck 干净（packages/opencode）；交付指纹 notify-delivery-sha256:9dc85210…e69f（16 文件，A15-reproducible）
+```
+
+依赖链：T701（Slice A）与 T702/T703（Slice B）相互独立 → T701-FIX（依赖 REVIEW 裁决）→ T704（依赖全部）
+并行分组：批14（T701 ∥ T702 ∥ T703 → T701-FIX → T704），三重 Loop 全过
+
+关键事实（供后续引用）：
+- merge-on-upstream 替代 rebase：保留本地提交、无需 force-push；fork 定制文件冲突以 --ours 本地为准，非定制冲突 --abort 交人工
+- 新增 fork 定制文件必须同步登记到 PROTECTED_FILES，否则 merge 冲突时不会以本地为准（脚本头注释警示）
+- QuestionAsked 是 Fork 新增 hook 事件（上游无），SDK 已再生成（sdk.gen.ts/types.gen.ts）；ephemeral 语义不入 durable event manifest
+- 交付指纹重算命令与 A15 自检机制见 .opencode/hooks/notify/README.md（16 文件，LC_ALL=C sort 钉扎）

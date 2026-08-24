@@ -4,6 +4,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { SessionID } from "@/session/schema"
 import { QuestionID } from "./schema"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { SettingsHook } from "@/hook/settings"
 import { QuestionV1 } from "@opencode-ai/schema/question-v1"
 
 export const Option = QuestionV1.Option
@@ -103,6 +104,24 @@ export const layer = Layer.effect(
       pending.set(id, { info, deferred })
       yield* events.publish(Event.Asked, info)
 
+      // QuestionAsked hook (fork): notify-style trigger on ask. Resolved lazily
+      // via serviceOption so Question stays constructible without the hook
+      // system; a failing or absent hook never blocks the question.
+      const hookOption = yield* Effect.serviceOption(SettingsHook.Service)
+      if (hookOption._tag === "Some") {
+        yield* hookOption.value
+          .trigger(
+            {
+              event: "QuestionAsked",
+              questions: input.questions,
+              prompt: input.questions[0]?.question,
+              ...(input.tool ? {} : { title: input.questions[0]?.header }),
+            },
+            { sessionID: input.sessionID, transcriptPath: "" },
+          )
+          .pipe(Effect.catchCause(() => Effect.logWarning("QuestionAsked hook failed (non-blocking)")))
+      }
+
       return yield* Effect.ensuring(
         Deferred.await(deferred),
         Effect.sync(() => {
@@ -128,7 +147,7 @@ export const layer = Layer.effect(
         requestID: existing.info.id,
         answers: input.answers.map((a) => [...a]),
       })
-      yield* Deferred.succeed(existing.deferred, input.answers)
+      return yield* Deferred.succeed(existing.deferred, input.answers)
     })
 
     const reject = Effect.fn("Question.reject")(function* (requestID: QuestionID) {
@@ -144,7 +163,7 @@ export const layer = Layer.effect(
         sessionID: existing.info.sessionID,
         requestID: existing.info.id,
       })
-      yield* Deferred.fail(existing.deferred, new RejectedError())
+      return yield* Deferred.fail(existing.deferred, new RejectedError())
     })
 
     const list = Effect.fn("Question.list")(function* () {

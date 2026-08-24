@@ -279,3 +279,23 @@
 - **5 个测试文件**：`test/command-name.test.ts`（边界并入）、`test/cli/error.test.ts`（remote auth 2 用例）、`test/cli/run/splash.test.ts`（真实 TUI 渲染回归，核心）、`test/provider/error.test.ts`（网关 401）、`test/acp/initialize.test.ts`（ACP initialize）。
 - **核心回归**：splash.test.ts 用 createTestRenderer 捕获真实 TUI 输出，断言含 `${commandName()} --mini -s sess_abc` 且不含 `opencode --mini`。
 - **provider.ts 2 处（cloudflare/snowflake）无单测**（custom() 私有重依赖），留 T602 strings 扫描 + 手动触发验证。
+
+## R15 章节（2026-08-24，T701/T701-FIX/T702/T703/T704）
+
+### 1. DAG replan 的 pending 节点被 superseded cancel 后 extend 无法复活（可复用）
+- **现象**：DAG replan 时不在 fragment 里的 pending 节点会被 superseded cancel（副作用）；审查链节点被取消后，extend 无法将其复活。
+- **根因**：replan 以"当前 fragment 包含的节点"为存活集合，被排除的 pending 节点统一打 superseded；节点 terminal 状态不可变，`addsNewNode` 判定基于 DB 现有行是否含 superseded——已取消节点既不能改状态也不能复用 id 追加。
+- **方案**：被取消的节点须用**新 id** 重新创建，或直接走三重 Loop 补链（Reviewer/Tester/Approval 全链重跑），不要尝试 extend 旧节点。
+- **可复用性**：任何"DAG 图结构变更 + 审查链重跑"场景，节点一旦 terminal（含 superseded）即不可变，复活唯一路径是新 id 或整链重跑。
+
+### 2. shell 脚本中后注册的 trap 覆盖先注册的（隐性维护陷阱，可复用）
+- **现象**：opencodeg-update 安装阶段（L239）`trap 'rm -f "$TMP_BIN"; rollback; exit 130' INT TERM` 覆盖了编译阶段（L188）`trap 'rollback; exit 130' INT TERM`——bash trap 是按信号替换而非叠加。
+- **根因**：FIX-01 前的安装阶段 trap 只 `rm -f "$TMP_BIN"` 不含 rollback，一旦安装期间收到 INT/TERM，回滚逻辑整体丢失，仓库停留在 merge 态。
+- **方案**：REVIEW 裁决 REVISE 驱动，L239 补回 `rollback`；写脚本时把"信号清理 + 回滚"合并进单一 trap 处理器，避免分阶段注册相互覆盖。
+- **可复用性**：shell 脚本中任何"分阶段注册 trap"都要意识到后注册覆盖先注册；清理与回滚必须并入同一处理器，或统一走单一 trap 函数分发。
+
+### 3. README 交付指纹重算命令与 A15 自检机制（2026-08-24，可复用）
+- **机制**：`.opencode/hooks/notify/README.md` 第 90 行记载交付指纹（16 个文件），复现命令对除 README 外的 15 个交付文件逐文件 sha256 后整体再 sha256；`LC_ALL=C sort` 钉扎文件顺序使指纹跨机可复现。`bun verify.ts` A15（verify.ts:477-486）持续自检：从 README 提取指纹命令 + 声称值，断言命令含 `LC_ALL=C sort`，重算比对一致。
+- **实测**：本次交付指纹 `9dc85210a8925e0d79a0559e4a03ee67f59b9dfeef92ad3702e3de8bb731e69f` 用 README 记载命令本会话复算一致。
+- **方案**：交付文件任何变动后必须重算指纹并更新 README 与 verify.ts 声称值，否则 A15 FAIL。
+- **可复用性**：任何"多文件交付 + 防篡改可核验"场景可套用此模式——指纹载体文档自身不进指纹（避免自哈希）；sort 钉 LC_ALL=C 保证跨机一致；verify 自检提取命令而非硬编码命令，命令与值双源比对。

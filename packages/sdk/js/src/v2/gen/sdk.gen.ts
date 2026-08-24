@@ -3438,6 +3438,7 @@ export class Hook extends HeyApiClient {
         | "TaskCompleted"
         | "Elicitation"
         | "ElicitationResult"
+        | "QuestionAsked"
         | "ConfigChange"
         | "WorktreeCreate"
         | "WorktreeRemove"

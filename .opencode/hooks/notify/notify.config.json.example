@@ -1,0 +1,27 @@
+{
+  "$comment": "Copy to notify.config.json (gitignored) and fill real credentials. Env vars always win over this file.",
+  "channels": {
+    "windows-toast": {
+      "enabled": true,
+      "powershellPath": "",
+      "appId": "",
+      "timeoutMs": 8000
+    },
+    "dingtalk": {
+      "enabled": true,
+      "webhook": "",
+      "secret": "",
+      "keyword": "OpenCode"
+    },
+    "feishu": {
+      "enabled": true,
+      "webhook": "",
+      "secret": ""
+    }
+  },
+  "aggregate": { "windowMs": 10000 },
+  "stopMode": "auto",
+  "durationMinMs": 0,
+  "locale": "zh",
+  "dryRun": false
+}

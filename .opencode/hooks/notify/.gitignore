@@ -1,0 +1,4 @@
+# local secrets & runtime state (never commit) — paths relative to this directory
+notify.config.json
+state/
+logs/

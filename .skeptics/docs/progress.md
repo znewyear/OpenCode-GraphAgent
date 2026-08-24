@@ -10,6 +10,7 @@
 | P007 | 增强 opencodeg-update：依赖自动解决 + DAG 配置智能同步（R13） | opencodeg-update 增强五项能力：①仓库自动拉取（已有）②数据不丢失（本地改动/会话DB/workflows自定义）③跟随发版版本号自动编译（已有+验证1.0.26）④依赖自动解决（bun.lock变化才install）⑤DAG配置智能同步（workflows转git checkout） | opencodeg-update 满足五项能力，可升级到 1.0.26-opencodeg | ⭐⭐⭐ | 100% | ✅ 已完成 |
 | P006 | 补齐 opencodeg 的 DAG 流程化内容（R12） | 安装 16 个 DAG 模板到全局层（T401）、dag.jsonc 配 standard 模型（T402）、/dag-init 降级为记录失败+认证指引（T403）、/dag-flow 端到端验证（T404）、DAG 关键事实沉淀（T405）、/dag-init 平台握手（T406） | /dag-flow 可用（不依赖平台握手）；平台握手实质打通（can_push=false 已知限制） | ⭐⭐⭐ | 100% | ✅ 已完成 |
 | P008 | 修复 opencodeg 命令名提示硬编码（R14） | 退出会话恢复提示 + 全部面向用户的命令名提示用 basename(process.execPath) 动态化（8 处 5 文件）；重建重装验证 | 恢复提示显示 opencodeg --mini -s ...；所有命令提示随产物名 | ⭐⭐ | 45% | 🔄 进行中 |
+| P009 | 完善 fork 更新链路与通知配置（R15） | opencodeg-update 改 merge-on-upstream + 冲突保护；notify 两级配置 + QuestionAsked hook 事件 | 3 项交付 + 1 项保护完成，三重 Loop 全过 | ⭐⭐⭐ | 100% | ✅ 已完成 |
 
 ## 进度详情
 ### P001 - OpenCode-GraphAgent 源码安装（opencodeg）
@@ -156,5 +157,38 @@
     - 处理：构建后 bun.lock 被 build.ts 内置 install 污染（npmmirror URL）→ git checkout 还原；stash 还原 .gitignore+3 untracked
     - 回归验证全绿：版本 1.0.26-opencodeg / models 正常 / workflows 16 文件无自定义丢失 / git baseline+sync 两提交
   - 已知副作用（验收接受）：build.ts 内置 3 次 `bun install`（第 151-153 行）每次构建会重写 bun.lock 源 URL 为 npmmirror → 构建后需 `git checkout -- bun.lock` 还原，不可提交
-  - 关联任务：T501, T502, T503（T503a 集成 + T503b 真实回归）
-  - 依赖链：T501 → T502（独立）→ T503a（依赖 T501+T502）→ T503b（依赖 T503a+用户授权）
+- 关联任务：T501, T502, T503（T503a 集成 + T503b 真实回归）
+- 依赖链：T501 → T502（独立）→ T503a（依赖 T501+T502）→ T503b（依赖 T503a+用户授权）
+
+### P009 - 完善 fork 更新链路与通知配置（R15）
+- 实施时间：2026-08-24
+- 结束时间：2026-08-24
+- 当前阶段：✅ 已完成（T701 ✅、T701-FIX ✅、T702 ✅、T703 ✅、T704 ✅，三重 Loop 全过）
+- 进度：100%
+- 结论简要：
+  - 背景（用户需求 R15）：完善 fork 更新链路与通知配置——3 项交付 + 1 项保护
+  - 交付 1（Slice A，T701）opencodeg-update 同步改造：
+    - 从 rebase-on-origin 改为 **merge-on-upstream**：fetch upstream --tags → rev-list 落后检查 → `git merge --no-edit refs/remotes/upstream/main`（无 rebase、无 force-push，保留本地提交）
+    - 冲突保护（1 项保护）：12 个 PROTECTED_FILES 逐个 `git checkout --ours` 保留本地定制；非保护文件冲突/merge 提交失败 → `git merge --abort` exit 1 交人工
+    - 回滚不变：rollback() = git reset --hard OLD_HEAD（merge 前 L141 记录）；测试缝 OPENCODEG_WORKDIR / --check / OPENCODEG_SKIP_BUILD=1
+    - 仓库源管理副本 script/opencodeg-update.sh 与安装副本 ~/.local/bin/opencodeg-update **字节一致**，sha256=f80735109a5e337b5753ba2be382c815519cb5f3810155a33fb7fd9d2406b335
+    - three-repo-update.sh 未动
+  - 缺陷修复（FIX-01，T701-FIX，REVIEW 裁决 REVISE 驱动）：
+    - 安装阶段 INT/TERM trap 覆盖编译阶段的回滚 trap（后注册 trap 覆盖先注册的）→ 安装阶段中断只删临时文件不回滚
+    - 修复：script L239 `trap 'rm -f "$TMP_BIN"; rollback; exit 130' INT TERM` 补回 rollback
+  - 交付 2（Slice B-1，T702）notify 两级配置：
+    - resolveConfig 链：env > 项目 `<cwd>/.opencode/notify.jsonc` > 全局 `~/.config/opencodeg/notify.jsonc` > legacy notify.config.json > 编译默认
+    - JSONC 注释剥离；per-channel per-field 深合并；解析失败降级（不阻断）
+    - 全局 `~/.config/opencodeg/notify.jsonc` 已创建（全部渠道开关）；项目模板 `.opencode/notify.jsonc.example` 已建（纯占位无密钥）
+  - 交付 3（Slice B-2，T703）QuestionAsked hook 事件：
+    - settings.ts 4 处注册（HookEvent union L94 / VALID_HOOK_EVENTS L124 / HookPayload union L445 / buildStdinEnvelope case L1271）
+    - question/index.ts `Question.ask` 用 `Effect.serviceOption(SettingsHook.Service)` 触发，失败仅 logWarning 不阻断提问（L110-123）
+    - dispatcher 监听 QuestionAsked；format.ts 输出 critical 通知（项目名 basename(cwd)/标题/会话 id 短码/描述）；elicitation 10s 窗口去重
+    - SDK 再生成（packages/sdk/js/src/v2/gen/sdk.gen.ts、types.gen.ts）
+  - 审查链（三重 Loop）：
+    - GATES 验证全 PASS → REVIEW 裁决 **REVISE**（trap 缺陷 + 交付项）→ FIX-01 修复 + 指纹重算 → Tester 复验 verify 20/20 + event-wiring 22/22 → Approval 对抗审视通过
+    - packages/opencode typecheck 干净
+  - 交付指纹：`notify-delivery-sha256:9dc85210a8925e0d79a0559e4a03ee67f59b9dfeef92ad3702e3de8bb731e69f`（16 文件，A15-reproducible，本会话复算一致）
+  - 未做（交付动作，用户待办）：`script/opencodeg-update.sh`、`.opencode/hooks/notify/`、`.opencode/notify.jsonc.example` 及 Slice B 的 packages 改动尚未 git add/commit（feat/opencodeg-local 分支，交付 PR 时提交）
+- 关联任务：T701, T701-FIX, T702, T703, T704
+- 依赖链：T701（Slice A）∥ T702/T703（Slice B）→ T701-FIX（依赖 REVIEW 裁决）→ T704（依赖全部）

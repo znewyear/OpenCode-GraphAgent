@@ -1,0 +1,33 @@
+{
+  "$comment": "Copy to <project>/.opencode/hooks.json (already gitignored). ${CLAUDE_PLUGIN_ROOT} expands to the directory containing this hooks.json at spawn time. async=true keeps the agent loop latency-free; timeout is in seconds.",
+  "Stop": [
+    {
+      "hooks": [{ "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/notify/dispatcher.ts", "timeout": 30, "async": true }]
+    }
+  ],
+  "StopFailure": [
+    {
+      "hooks": [{ "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/notify/dispatcher.ts", "timeout": 30, "async": true }]
+    }
+  ],
+  "PermissionRequest": [
+    {
+      "hooks": [{ "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/notify/dispatcher.ts", "timeout": 30, "async": true }]
+    }
+  ],
+  "Notification": [
+    {
+      "hooks": [{ "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/notify/dispatcher.ts", "timeout": 30, "async": true }]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [{ "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/notify/dispatcher.ts", "timeout": 30, "async": true }]
+    }
+  ],
+  "QuestionAsked": [
+    {
+      "hooks": [{ "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/notify/dispatcher.ts", "timeout": 30, "async": true }]
+    }
+  ]
+}
