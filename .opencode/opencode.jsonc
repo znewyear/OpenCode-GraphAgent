@@ -4,6 +4,9 @@
     "openrouter": {
       "npm": "@openrouter/ai-sdk-provider",
       "name": "OpenRouter",
+      "whitelist": [
+        "stealth/ox-alpha"
+      ],
       "models": {
         "stealth/ox-alpha": {
           "name": "Ox Alpha",
