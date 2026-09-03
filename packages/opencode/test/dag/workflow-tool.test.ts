@@ -652,7 +652,7 @@ describe("workflow tool schema (negative tests)", () => {
         name: "structured-draft",
         objective: "Validate the draft rendering path.",
         blocks: [
-          { id: "map", kind: "explore", instruction: "Map the seams." },
+          { id: "map", kind: "explore", instruction: "Map the seams.", worker_config: { timeout_ms: 4321 } },
           { id: "review", kind: "review", depends_on: ["map"] },
         ],
       },
@@ -661,6 +661,12 @@ describe("workflow tool schema (negative tests)", () => {
     // The high-frequency drift shapes die at the schema boundary.
     expect(() =>
       decode({ params: { action: "draft", config: { ...draft.config, blocks: [{ id: "x", kind: "coding", worker: "general" }] } } }),
+    ).toThrow()
+    expect(() =>
+      decode({ params: { action: "draft", config: { ...draft.config, blocks: [{ id: "x", kind: "coding", worker_timeout: 5000 }] } } }),
+    ).toThrow()
+    expect(() =>
+      decode({ params: { action: "draft", config: { ...draft.config, blocks: [{ id: "x", kind: "coding", worker_config: { foo: 1 } }] } } }),
     ).toThrow()
     expect(() => decode({ params: { action: "draft", objective: "top level" } })).toThrow()
     expect(() => decode({ params: { action: "draft" } })).toThrow()
@@ -2012,6 +2018,59 @@ config:
     }),
   )
 
+  // issue #425: block-level worker_config rides through compilation onto the
+  // expanded nodes and beats node_defaults; omitted blocks still inherit.
+  runtime.effect("start resolves block worker_config over node_defaults", () =>
+    Effect.gen(function* () {
+      published.length = 0
+      const info = yield* WorkflowTool
+      const workflow = yield* info.init()
+      const specPath = yield* writeWorkflowSpec("block-worker-config", {
+        config: {
+          name: "block-worker-config",
+          objective: "Bound each block individually.",
+          node_defaults: {
+            worker_config: { timeout_ms: 1234 },
+          },
+          blocks: [
+            { id: "override", kind: "coding", worker_config: { timeout_ms: 4321 } },
+            { id: "inherit", kind: "verify", depends_on: ["override"] },
+            { id: "diag", kind: "debug", depends_on: ["inherit"], worker_config: { timeout_ms: 4321 } },
+          ],
+        },
+      })
+
+      yield* workflow.execute(
+        { params: {
+          action: "start",
+          spec_path: specPath,
+        }},
+        {
+          sessionID: SessionID.make("ses_workflow_parent"),
+          messageID: MessageID.ascending(),
+          agent: "build",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        } satisfies Tool.Context,
+      )
+
+      const created = published.find((event) => event.type === DagEvent.WorkflowCreated.type)?.data
+      const configJSON =
+        typeof created === "object" && created !== null && "config" in created && typeof created.config === "string"
+          ? created.config
+          : "{}"
+      const nodes: Array<{ id: string; worker_config?: { timeout_ms?: number } }> = JSON.parse(configJSON).nodes ?? []
+      expect(Object.fromEntries(nodes.map((node) => [node.id, node.worker_config?.timeout_ms]))).toEqual({
+        override: 4321,
+        inherit: 1234,
+        "diag--evidence": 4321,
+        diag: 4321,
+      })
+    }),
+  )
+
   runtime.effect("extend resolves new nodes from the persisted workflow defaults", () =>
     Effect.gen(function* () {
       published.length = 0
@@ -2493,6 +2552,52 @@ describe("workflow tool saved workflows", () => {
           const started = yield* workflow.execute({ params: { action: "start", spec_path: "shared-route" }}, contextWith([]))
           expect(started.title).toBe("Workflow started: project-route")
           expect(published.some((event) => event.type === DagEvent.WorkflowCreated.type)).toBe(true)
+        } finally {
+          if (previousBuiltin === undefined) delete (globalThis as Record<string, unknown>).OPENCODE_DAG_TEMPLATES
+          else (globalThis as Record<string, unknown>).OPENCODE_DAG_TEMPLATES = previousBuiltin
+        }
+      }),
+    ),
+  )
+
+  runtime.effect("builtin:// spec_path from list output round-trips by name", () =>
+    withGlobalConfigDir((globalDir) =>
+      Effect.gen(function* () {
+        const routeSpec = (name: string) =>
+          `title: ${name} title\nconfig:\n  name: ${name}\n  objective: Route objective\n  blocks:\n    - id: plan\n      kind: plan\n`
+        yield* Effect.promise(() =>
+          Bun.write(path.join(globalDir, "workflows", "marker-route.yaml"), routeSpec("global-route")),
+        )
+        const previousBuiltin = (globalThis as Record<string, unknown>).OPENCODE_DAG_TEMPLATES
+        ;(globalThis as Record<string, unknown>).OPENCODE_DAG_TEMPLATES = {
+          "marker-builtin": routeSpec("marker-builtin-route"),
+        }
+        try {
+          const info = yield* WorkflowTool
+          const workflow = yield* info.init()
+
+          // the synthetic builtin:// marker resolves by name through the library
+          const builtinRead = yield* workflow.execute(
+            { params: { action: "read", spec_path: "builtin://marker-builtin" }},
+            contextWith([]),
+          )
+          expect(JSON.parse(builtinRead.output).spec.title).toContain("marker-builtin-route")
+
+          // the marker resolves through the same shadowing chain as a bare name
+          const shadowed = yield* workflow.execute(
+            { params: { action: "validate", spec_path: "builtin://marker-route" }},
+            contextWith([]),
+          )
+          expect(JSON.parse(shadowed.output).source).toBe(path.join(globalDir, "workflows", "marker-route.yaml"))
+
+          // unknown builtin names fail as a library lookup, not a path extension error
+          const missingExit = yield* Effect.exit(
+            workflow.execute({ params: { action: "read", spec_path: "builtin://missing-route" }}, contextWith([])),
+          )
+          expect(Exit.isFailure(missingExit)).toBe(true)
+          if (Exit.isFailure(missingExit)) {
+            expect(Cause.pretty(missingExit.cause)).toContain('Saved workflow not found: "missing-route"')
+          }
         } finally {
           if (previousBuiltin === undefined) delete (globalThis as Record<string, unknown>).OPENCODE_DAG_TEMPLATES
           else (globalThis as Record<string, unknown>).OPENCODE_DAG_TEMPLATES = previousBuiltin

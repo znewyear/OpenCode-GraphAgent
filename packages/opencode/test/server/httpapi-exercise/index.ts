@@ -24,7 +24,6 @@ import path from "path"
 import { array, boolean, check, isRecord, message, object, stable } from "./assertions"
 import { controlledPtyInput, http, route } from "./dsl"
 import {
-  cleanupExercisePaths,
   exerciseConfigDirectory,
   exerciseDataDirectory,
   exerciseDatabasePath,
@@ -33,8 +32,8 @@ import {
 import { color, printHeader, printResults } from "./report"
 import { coverageResult, parseOptions, routeKey, routeKeys, selectedScenarios } from "./routing"
 import { runScenario } from "./runner"
-import { disposeApps } from "./backend"
 import { runtime } from "./runtime"
+import { runMainWithHardExit, teardown } from "./teardown"
 import { type Options, type Scenario } from "./types"
 import { startProgressWatchdog } from "./watchdog"
 
@@ -372,7 +371,29 @@ const scenarios: Scenario[] = [
         }),
       "status",
     ),
-  http.protected.get("/mcp", "mcp.status").json(),
+  http.protected.get("/mcp", "mcp.status").json(
+    200,
+    (body) => {
+      object(body)
+      for (const entry of Object.values(body)) {
+        object(entry)
+        if (entry.status === "connected") {
+          check(
+            entry.era === undefined || entry.era === "modern" || entry.era === "legacy",
+            "connected MCP status era should be modern or legacy when present",
+          )
+          check(
+            entry.protocolVersion === undefined || typeof entry.protocolVersion === "string",
+            "connected MCP status protocolVersion should be a string when present",
+          )
+        } else {
+          check(entry.era === undefined, "MCP era field should only appear on connected statuses")
+          check(entry.protocolVersion === undefined, "MCP protocolVersion field should only appear on connected statuses")
+        }
+      }
+    },
+    "status",
+  ),
   http.protected
     .post("/mcp", "mcp.add")
     .mutating()
@@ -1831,6 +1852,10 @@ const scenarios: Scenario[] = [
         check(typeof summary.status === "string", "summary should have status")
         check(typeof summary.title === "string", "summary should have title")
         check(typeof summary.escalatedNodes === "number", "summary should have escalatedNodes")
+        // #468: graphRev is the topology invalidation token — an equal-count
+        // replan bumps it alone so TUI signatures can detect the change.
+        check(typeof summary.graphRev === "number", "summary should have graphRev")
+        check(summary.graphRev === 1, "fresh fixture workflow should carry graphRev 1")
       }),
     ),
 
@@ -2190,13 +2215,7 @@ const llmScenarios = new Set([
 ])
 
 const main = Effect.gen(function* () {
-  yield* Effect.addFinalizer(() =>
-    Effect.promise(() => disposeApps(options.heartbeat)).pipe(
-      Effect.andThen(Effect.sync(() => options.heartbeat?.("teardown: cleanupExercisePaths"))),
-      Effect.andThen(cleanupExercisePaths),
-      Effect.andThen(Effect.sync(() => options.heartbeat?.("teardown: complete"))),
-    ),
-  )
+  yield* Effect.addFinalizer(() => Effect.promise(() => teardown(options)))
   const parsed = parseOptions(Bun.argv.slice(2))
   const options: Options = parsed.progress ? { ...parsed, heartbeat: startProgressWatchdog() } : parsed
   const modules = yield* Effect.promise(() => runtime())
@@ -2240,10 +2259,7 @@ const main = Effect.gen(function* () {
   return undefined
 })
 
-Effect.runPromise(main.pipe(Effect.provide(TestLLMServer.layer), Effect.scoped)).then(
-  () => process.exit(0),
-  (error: unknown) => {
-    console.error(`${color.red}${message(error)}${color.reset}`)
-    process.exit(1)
-  },
+runMainWithHardExit(
+  Effect.runPromise(main.pipe(Effect.provide(TestLLMServer.layer), Effect.scoped)),
+  (code) => process.exit(code),
 )

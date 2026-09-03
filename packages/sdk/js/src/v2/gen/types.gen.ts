@@ -678,6 +678,7 @@ export type DagWorkflowSummary = {
   id: string
   title: string
   status: string
+  graphRev: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   nodeCount: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   completedNodes: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   runningNodes: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
@@ -1815,31 +1816,7 @@ export type AgentConfig = {
   steps?: number
   maxSteps?: number
   permission?: PermissionConfig
-  [key: string]:
-    | unknown
-    | string
-    | number
-    | {
-        [key: string]: boolean
-      }
-    | boolean
-    | "subagent"
-    | "primary"
-    | "all"
-    | {
-        [key: string]: unknown
-      }
-    | string
-    | "primary"
-    | "secondary"
-    | "accent"
-    | "success"
-    | "warning"
-    | "error"
-    | "info"
-    | number
-    | PermissionConfig
-    | undefined
+  [key: string]: unknown
 }
 
 export type ProviderConfig = {
@@ -1864,7 +1841,7 @@ export type ProviderConfig = {
      */
     headerTimeout?: number | false
     chunkTimeout?: number
-    [key: string]: unknown | string | boolean | number | false | number | false | number | undefined
+    [key: string]: unknown
   }
   models?: {
     [key: string]: {
@@ -1920,7 +1897,7 @@ export type ProviderConfig = {
       variants?: {
         [key: string]: {
           disabled?: boolean
-          [key: string]: unknown | boolean | undefined
+          [key: string]: unknown
         }
       }
     }
@@ -1942,6 +1919,7 @@ export type McpLocalConfig = {
   }
   enabled?: boolean
   timeout?: number
+  protocol?: "auto" | "legacy" | "modern"
 }
 
 export type McpOAuthConfig = {
@@ -1970,6 +1948,7 @@ export type McpRemoteConfig = {
    */
   oauth?: McpOAuthConfig | false
   timeout?: number
+  protocol?: "auto" | "legacy" | "modern"
 }
 
 /**
@@ -2488,6 +2467,8 @@ export type FormatterStatus = {
 
 export type McpStatusConnected = {
   status: "connected"
+  era?: "modern" | "legacy"
+  protocolVersion?: string
 }
 
 export type McpStatusDisabled = {
@@ -2972,6 +2953,7 @@ export type DagWorkflowSummary1 = {
   id: string
   title: string
   status: string
+  graphRev: number | "NaN" | "Infinity" | "-Infinity"
   nodeCount: number | "NaN" | "Infinity" | "-Infinity"
   completedNodes: number | "NaN" | "Infinity" | "-Infinity"
   runningNodes: number | "NaN" | "Infinity" | "-Infinity"

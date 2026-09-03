@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { testRender, useRenderer } from "@opentui/solid"
 import type { TuiPluginApi, TuiRouteCurrent, TuiRouteDefinition } from "@opencode-ai/plugin/tui"
-import type { DagNode, DagWorkflowSummary } from "@opencode-ai/sdk/v2"
+import type { DagNode, DagWorkflow, DagWorkflowSummary } from "@opencode-ai/sdk/v2"
 import { KVProvider } from "../../src/context/kv"
 import { ThemeProvider } from "../../src/context/theme"
 import { TuiConfigProvider } from "../../src/config"
@@ -20,6 +20,7 @@ const wfSummary = (overrides: Partial<DagWorkflowSummary> = {}): DagWorkflowSumm
   id: "wf-1",
   title: "Test workflow",
   status: "running",
+  graphRev: 1,
   nodeCount: 2,
   completedNodes: 0,
   runningNodes: 0,
@@ -33,11 +34,24 @@ const wfSummary = (overrides: Partial<DagWorkflowSummary> = {}): DagWorkflowSumm
 type RenderOpts = {
   workflows?: DagWorkflowSummary[]
   serverWorkflows?: DagWorkflowSummary[]
+  projectWorkflows?: DagWorkflow[]
   nodes?: DagNode[]
   initialRoute?: TuiRouteCurrent
   summary?: (sessionID: string) => Promise<{ data: DagWorkflowSummary[] }>
+  fetchTimeoutMs?: number
   width?: number
 }
+
+const projectWorkflow = (overrides: Partial<DagWorkflow> & { id: string; session_id: string }): DagWorkflow => ({
+  project_id: "proj_1",
+  title: `Workflow ${overrides.id}`,
+  status: "running",
+  config: "{}",
+  seq: 1,
+  time_created: 0,
+  time_updated: 0,
+  ...overrides,
+})
 
 function dagNode(overrides: Partial<DagNode> & { id: string }): DagNode {
   return {
@@ -64,9 +78,13 @@ async function renderDagInspector(opts: RenderOpts = {}) {
 
   // Updatable workflow state for change detection.
   let workflowsState = opts.workflows ?? []
+  // Updatable node state so a replan can serve a fresh node set.
+  let nodesState = opts.nodes ?? []
 
   // Trackable spies
   const nodesCalls: string[] = []
+  const summaryCalls: string[] = []
+  let listCalls = 0
   const controlCalls: { dagID: string; operation: string }[] = []
   const commandCalls: unknown[] = []
   const navigations: { name: string; params?: Record<string, unknown> }[] = []
@@ -87,11 +105,17 @@ async function renderDagInspector(opts: RenderOpts = {}) {
       keymap,
       client: {
         dag: {
-          summary: async (input: { sessionID: string }) =>
-            opts.summary?.(input.sessionID) ?? { data: opts.serverWorkflows ?? workflowsState },
+          list: async () => {
+            listCalls += 1
+            return { data: opts.projectWorkflows ?? [] }
+          },
+          summary: async (input: { sessionID: string }) => {
+            summaryCalls.push(input.sessionID)
+            return opts.summary?.(input.sessionID) ?? { data: opts.serverWorkflows ?? workflowsState }
+          },
           nodes: async (input: { dagID: string }) => {
             nodesCalls.push(input.dagID)
-            return { data: opts.nodes ?? [] }
+            return { data: nodesState }
           },
           control: async (input: { dagID: string; operation: string }) => {
             controlCalls.push(input)
@@ -119,6 +143,9 @@ async function renderDagInspector(opts: RenderOpts = {}) {
     })
     const api = {
       ...base,
+      ...(opts.fetchTimeoutMs !== undefined
+        ? { tuiConfig: { ...base.tuiConfig, dag_fetch_timeout_ms: opts.fetchTimeoutMs } }
+        : {}),
       route: {
         register(routes) {
           renderInspector = routes.find((route) => route.name === "dag")?.render
@@ -173,9 +200,14 @@ async function renderDagInspector(opts: RenderOpts = {}) {
     commandCalls: () => commandCalls,
     toasts: () => toasts,
     nodesCalls: () => nodesCalls,
+    summaryCalls: () => summaryCalls,
+    listCalls: () => listCalls,
     controlCalls: () => controlCalls,
     setWorkflows: (wfs: DagWorkflowSummary[]) => {
       workflowsState = wfs
+    },
+    setNodes: (nodes: DagNode[]) => {
+      nodesState = nodes
     },
     emitSummaryUpdate: (sessionID: string = SESSION_ID) => {
       eventHandlers.get("dag.workflow.summary.updated")?.({
@@ -355,6 +387,28 @@ describe("DagInspector", () => {
     }
   })
 
+  test("equal-count replan bumps graphRev alone and refetches exactly once with the replanned node set", async () => {
+    const viewer = await renderDagInspector({
+      workflows: [wfSummary({ id: "wf-1", nodeCount: 2, completedNodes: 0, graphRev: 1 })],
+      nodes: [dagNode({ id: "n-1", name: "build-old", status: "running" })],
+    })
+    try {
+      await viewer.app.waitForFrame((frame) => frame.includes("build-old"))
+      const before = viewer.nodesCalls().length
+      // Equal-count replan: identical counts/status, only the topology
+      // revision moved. The server now serves the replanned node set.
+      viewer.setNodes([dagNode({ id: "n-2", name: "build-new", status: "pending" })])
+      viewer.setWorkflows([wfSummary({ id: "wf-1", nodeCount: 2, completedNodes: 0, graphRev: 2 })])
+      viewer.emitSummaryUpdate()
+      await waitForCondition(() => viewer.nodesCalls().length === before + 1)
+      await Bun.sleep(50)
+      expect(viewer.nodesCalls().length).toBe(before + 1)
+      await viewer.app.waitForFrame((frame) => frame.includes("build-new") && !frame.includes("build-old"))
+    } finally {
+      viewer.app.renderer.destroy()
+    }
+  })
+
   test("summary for another session does not trigger a re-fetch", async () => {
     const viewer = await renderDagInspector({
       workflows: [wfSummary({ id: "wf-1", completedNodes: 0 })],
@@ -374,12 +428,18 @@ describe("DagInspector", () => {
 
   test("unchanged summary does not trigger a re-fetch", async () => {
     const viewer = await renderDagInspector({
-      workflows: [wfSummary({ id: "wf-1", completedNodes: 0 })],
+      workflows: [wfSummary({ id: "wf-1", completedNodes: 0, graphRev: 1 })],
       nodes: [dagNode({ id: "n-1", name: "build", status: "running" })],
     })
     try {
       const before = viewer.nodesCalls().length
-      // Don't change the workflow state — signature stays the same.
+      // Re-emit the exact same aggregates AND the same graphRev — a no-op
+      // summary event (server re-broadcasts identical state). Neither emit
+      // may refetch nodes.
+      viewer.setWorkflows([wfSummary({ id: "wf-1", completedNodes: 0, graphRev: 1 })])
+      viewer.emitSummaryUpdate()
+      await Bun.sleep(50)
+      expect(viewer.nodesCalls().length).toBe(before)
       viewer.emitSummaryUpdate()
       await Bun.sleep(50)
       expect(viewer.nodesCalls().length).toBe(before)
@@ -682,6 +742,80 @@ describe("DagInspector", () => {
       } finally {
         viewer.app.renderer.destroy()
       }
+    }
+  })
+
+  test("lists project workflows when the route has no session context", async () => {
+    const viewer = await renderDagInspector({
+      initialRoute: { name: "dag" },
+      projectWorkflows: [
+        projectWorkflow({ id: "wf-p1", session_id: "ses_a", title: "Orphan discovery", status: "running" }),
+        projectWorkflow({ id: "wf-p2", session_id: "ses_b", title: "Other session", status: "completed" }),
+      ],
+      summary: (sessionID) =>
+        Promise.resolve({
+          data:
+            sessionID === "ses_a"
+              ? [wfSummary({ id: "wf-p1", title: "Orphan discovery", status: "running" })]
+              : [],
+        }),
+    })
+    try {
+      // Discovery renders workflows from any session when the route carries
+      // no sessionID — the zero-request empty state is gone.
+      await viewer.app.waitForFrame((frame) => frame.includes("Orphan discovery"))
+      // Workflows group by owning session for the session-scoped summary; a
+      // dead session resolves empty without failing the whole discovery.
+      expect(viewer.summaryCalls()).toEqual(["ses_a", "ses_b"])
+    } finally {
+      viewer.app.renderer.destroy()
+    }
+  })
+
+  test("falls back to project discovery when the routed session has no workflows", async () => {
+    const viewer = await renderDagInspector({
+      projectWorkflows: [projectWorkflow({ id: "wf-p1", session_id: "ses_other" })],
+      summary: (sessionID) =>
+        Promise.resolve({
+          data:
+            sessionID === SESSION_ID
+              ? []
+              : [wfSummary({ id: "wf-p1", title: "Discovered elsewhere", status: "running" })],
+        }),
+    })
+    try {
+      await viewer.app.waitForFrame((frame) => frame.includes("Discovered elsewhere"))
+    } finally {
+      viewer.app.renderer.destroy()
+    }
+  })
+
+  test("without session context the empty state stays honest about what was consulted", async () => {
+    const viewer = await renderDagInspector({ initialRoute: { name: "dag" } })
+    try {
+      await viewer.app.waitForFrame((frame) => frame.includes("No DAG workflows"))
+      // The project list is the discovery source that does not depend on the
+      // route's sessionID chain — it is consulted even without a session,
+      // while session summaries never run (an empty list has no sessions).
+      expect(viewer.listCalls()).toBe(1)
+      expect(viewer.summaryCalls()).toEqual([])
+    } finally {
+      viewer.app.renderer.destroy()
+    }
+  })
+
+  test("retries when the initial summary fetch stalls", async () => {
+    const viewer = await renderDagInspector({
+      initialRoute: { name: "dag", params: { sessionID: SESSION_ID } },
+      summary: () => new Promise(() => {}),
+      fetchTimeoutMs: 60,
+    })
+    try {
+      // A stalled fetch must not leave the inspector stuck on its first
+      // attempt forever; the component re-attempts after its timeout.
+      await waitForCondition(() => viewer.summaryCalls().length >= 2, 3000)
+    } finally {
+      viewer.app.renderer.destroy()
     }
   })
 })
