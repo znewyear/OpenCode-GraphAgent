@@ -1,6 +1,7 @@
 /**
  * Cross-process state under stateDir (each hook invocation is a separate process):
- *  - prompt-<sid>.json : UserPromptSubmit timestamps (consumed at Stop)
+ *  - prompt-<sid>.json : UserPromptSubmit {ts, prompt} stamps (consumed at Stop;
+ *    pre-upgrade {ts}-only files degrade prompt to "")
  *  - agg-stop.json     : aggregation buffer for untimestamped Stops (design §1.2)
  *  - agg.lock          : wx-flag lock guarding digest flush (winner sends, losers exit)
  *  - recent.json       : permission-ask marker + same-text dedupe hashes
@@ -38,16 +39,23 @@ function writeJsonAtomic(file: string, data: unknown): void {
   renameSync(tmp, file)
 }
 
-export function recordPromptTs(stateDir: string, sid: string, ts: number): void {
-  writeJsonAtomic(path.join(stateDir, `prompt-${safeSid(sid)}.json`), { ts })
+export interface PromptStamp {
+  ts: number
+  /** One-lined UserPromptSubmit prompt; "" for pre-upgrade {ts}-only files. */
+  prompt: string
 }
 
-export function takePromptTs(stateDir: string, sid: string): number | undefined {
+export function recordPromptTs(stateDir: string, sid: string, ts: number, prompt: string): void {
+  writeJsonAtomic(path.join(stateDir, `prompt-${safeSid(sid)}.json`), { ts, prompt })
+}
+
+export function takePromptTs(stateDir: string, sid: string): PromptStamp | undefined {
   const file = path.join(stateDir, `prompt-${safeSid(sid)}.json`)
   const data = readObj(file)
   if (data === undefined) return undefined
   unlinkSync(file)
-  return typeof data.ts === "number" ? data.ts : undefined
+  if (typeof data.ts !== "number") return undefined
+  return { ts: data.ts, prompt: typeof data.prompt === "string" ? data.prompt : "" }
 }
 
 function parseEntries(v: unknown): Record<string, { count: number; lastTs: number }> {

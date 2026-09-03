@@ -1,0 +1,3 @@
+OpenCode: 需要你批准 [{code}]
+工具: {tool}
+输入: {input}

@@ -1,0 +1,3 @@
+OpenCode: 需要你回答 [{code}]
+项目 {project} · {title}
+{question}

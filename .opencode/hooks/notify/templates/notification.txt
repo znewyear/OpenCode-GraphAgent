@@ -1,0 +1,2 @@
+OpenCode: 通知
+{message}

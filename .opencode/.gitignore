@@ -3,6 +3,7 @@ plans
 package.json
 bun.lock
 /.gitignore
+/notify/
 /notify.jsonc
 package-lock.json
 references/

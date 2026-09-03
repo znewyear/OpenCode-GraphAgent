@@ -7,7 +7,7 @@
 import { resolveConfig, fileLog } from "./config"
 import { fanOut, listChannels, type Notification } from "./channels/registry"
 import { registerBuiltinChannels } from "./channels"
-import { formatEvent } from "./format"
+import { formatEvent, EVENT_LABELS } from "./format"
 import { addStopToBuffer, takeAggBufferIfDue, withLock, type AggBuffer } from "./state"
 import { isRecord } from "./lib/guards"
 
@@ -23,11 +23,19 @@ export interface DispatchDeps {
 }
 
 function digestNotification(buf: AggBuffer): Notification {
-  const codes = Object.keys(buf.entries)
+  const sids = Object.keys(buf.entries)
   const total = Object.values(buf.entries).reduce((acc, e) => acc + e.count, 0)
-  const shown = codes.slice(0, 6).map((sid) => sid.slice(-6)).join(",")
-  const more = codes.length > 6 ? ",…" : ""
-  return { kind: "digest", title: `OpenCode: ${total} 个并行回合完成`, body: `会话: ${shown}${more}`, event: "Stop" }
+  const more = sids.length > 6 ? ",…" : ""
+  const shown = sids.slice(0, 6).map((sid) => sid.slice(-6)).join(",")
+  // vars.sessions carries FULL ids (structured channels); the compiled body keeps
+  // short codes for compact channels (toast/feishu) exactly as before.
+  return {
+    kind: "digest",
+    title: `OpenCode: ${total} 个并行回合完成`,
+    body: `会话: ${shown}${more}`,
+    event: "Stop",
+    vars: { count: String(total), sessions: sids.slice(0, 6).join(",") + more, taskTitle: "", sessionId: "", eventLabel: EVENT_LABELS.digest },
+  }
 }
 
 async function flushDueBuffers(deps: DispatchDeps): Promise<void> {

@@ -23,5 +23,14 @@
   "stopMode": "auto",
   "durationMinMs": 0,
   "locale": "zh",
-  "dryRun": false
+  "dryRun": false,
+  "$events": "按事件开关与模板（均可省略；enabled 默认 true）。template 为 .txt 文件名/相对路径（相对各层 templates/ 目录）或绝对路径；查找顺序 项目 > 全局 > 模块默认 templates/。渠道级 template 覆盖事件级。占位符: stop{code}{duration}{summary} stopFailure{code}{error} permissionRequest{code}{tool}{input} notification{code}{message} questionAsked{code}{project}{title}{question} digest{count}{sessions}",
+  "events": {
+    "stop": { "enabled": true },
+    "stopFailure": { "enabled": true },
+    "permissionRequest": { "enabled": true },
+    "notification": { "enabled": true },
+    "questionAsked": { "enabled": true },
+    "digest": { "enabled": true }
+  }
 }

@@ -6,7 +6,7 @@
  */
 import { createHash } from "node:crypto"
 import path from "node:path"
-import type { ResolvedConfig } from "./config"
+import { eventKeyOf, type EventKey, type ResolvedConfig } from "./config"
 import type { Notification } from "./channels/registry"
 import { isRecord } from "./lib/guards"
 import {
@@ -23,6 +23,16 @@ import {
 export type Outcome = { type: "silent" } | { type: "now"; notification: Notification } | { type: "digest" }
 
 const DAY_MS = 24 * 60 * 60 * 1000
+
+/** Event → zh plaintext label for structured channel rendering (six values, digest included). */
+export const EVENT_LABELS: Record<EventKey, string> = {
+  stop: "回合完成",
+  stopFailure: "回合失败",
+  permissionRequest: "需要你批准",
+  notification: "通知",
+  questionAsked: "需要你回答",
+  digest: "并行回合完成",
+}
 
 export function shortSid(sid: string): string {
   return sid.slice(-6)
@@ -72,37 +82,59 @@ export function formatEvent(env: Record<string, unknown>, opts: { cfg: ResolvedC
   const sid = str(env.session_id) || "unknown"
   const code = shortSid(sid)
   const { cfg, stateDir, now } = opts
+  const project = path.basename(str(env.cwd)) || "unknown"
 
   if (event === "UserPromptSubmit") {
-    recordPromptTs(stateDir, sid, now())
+    recordPromptTs(stateDir, sid, now(), oneLine(env.prompt, 120))
     return { type: "silent" }
   }
 
+  // Event-level switch (events.<key>.enabled=false silences the whole event);
+  // UserPromptSubmit above stays pure timing instrumentation, never switchable.
+  const eventKey = eventKeyOf(event)
+  if (eventKey !== undefined && !cfg.events[eventKey].enabled) return { type: "silent" }
+
   if (event === "Stop") {
-    const promptTs = takePromptTs(stateDir, sid)
+    const stamp = takePromptTs(stateDir, sid)
     if (cfg.stopMode === "all-digest") return { type: "digest" }
     const summary = oneLine(env.last_assistant_message, 120)
-    if (promptTs === undefined) {
+    if (stamp === undefined) {
       if (cfg.stopMode === "all-immediate") {
-        return { type: "now", notification: { kind: "normal", title: `OpenCode: 回合完成 [${code}]`, body: summary, sessionId: code, event } }
+        return {
+          type: "now",
+          notification: { kind: "normal", title: `OpenCode: 回合完成 [${code}]`, body: summary, sessionId: code, event, vars: { code, duration: "", summary, taskTitle: "", sessionId: sid, eventLabel: EVENT_LABELS.stop, project } },
+        }
       }
       return { type: "digest" }
     }
-    const durationMs = now() - promptTs
+    const durationMs = now() - stamp.ts
     const showDuration = durationMs >= cfg.durationMinMs && durationMs <= DAY_MS
-    const body = [showDuration ? `耗时 ${formatDuration(durationMs)}` : "", summary].filter(Boolean).join("\n")
-    return { type: "now", notification: { kind: "normal", title: `OpenCode: 回合完成 [${code}]`, body, sessionId: code, durationMs, event } }
+    const duration = showDuration ? formatDuration(durationMs) : ""
+    const body = [showDuration ? `耗时 ${duration}` : "", summary].filter(Boolean).join("\n")
+    return {
+      type: "now",
+      notification: { kind: "normal", title: `OpenCode: 回合完成 [${code}]`, body, sessionId: code, durationMs, event, vars: { code, duration, summary, taskTitle: stamp.prompt, sessionId: sid, eventLabel: EVENT_LABELS.stop, project } },
+    }
   }
 
   if (event === "StopFailure") {
-    takePromptTs(stateDir, sid)
-    return { type: "now", notification: { kind: "critical", title: `OpenCode: 回合失败 [${code}]`, body: `错误: ${oneLine(env.error, 200)}`, sessionId: code, event } }
+    const stamp = takePromptTs(stateDir, sid)
+    const error = oneLine(env.error, 200)
+    return {
+      type: "now",
+      notification: { kind: "critical", title: `OpenCode: 回合失败 [${code}]`, body: `错误: ${error}`, sessionId: code, event, vars: { code, error, taskTitle: stamp?.prompt ?? "", sessionId: sid, eventLabel: EVENT_LABELS.stopFailure, project } },
+    }
   }
 
   if (event === "PermissionRequest") {
     markPermissionAsk(stateDir, now())
-    const body = [`工具: ${str(env.tool_name)}`, `输入: ${summarizeToolInput(env.tool_input)}`].filter(Boolean).join("\n")
-    return { type: "now", notification: { kind: "critical", title: `OpenCode: 需要你批准 [${code}]`, body, sessionId: code, event } }
+    const tool = str(env.tool_name)
+    const input = summarizeToolInput(env.tool_input)
+    const body = [`工具: ${tool}`, `输入: ${input}`].filter(Boolean).join("\n")
+    return {
+      type: "now",
+      notification: { kind: "critical", title: `OpenCode: 需要你批准 [${code}]`, body, sessionId: code, event, vars: { code, tool, input, taskTitle: "", sessionId: sid, eventLabel: EVENT_LABELS.permissionRequest, project } },
+    }
   }
 
   if (event === "Notification") {
@@ -115,7 +147,7 @@ export function formatEvent(env: Record<string, unknown>, opts: { cfg: ResolvedC
     const sentAt = textSentAt(stateDir, hash)
     if (sentAt !== undefined && ts - sentAt <= 5000 && ts - sentAt >= 0) return { type: "silent" }
     markTextSent(stateDir, hash, ts)
-    return { type: "now", notification: { kind: "normal", title: `OpenCode: 通知`, body: text, sessionId: code, event } }
+    return { type: "now", notification: { kind: "normal", title: `OpenCode: 通知`, body: text, sessionId: code, event, vars: { code, message: text, taskTitle: "", sessionId: sid, eventLabel: EVENT_LABELS.notification, project } } }
   }
 
   if (event === "QuestionAsked") {
@@ -129,11 +161,12 @@ export function formatEvent(env: Record<string, unknown>, opts: { cfg: ResolvedC
       : []
     const first = questions[0]
     const title = str(env.title) || str(first?.header)
-    const project = path.basename(str(env.cwd)) || "unknown"
-    const body = [`项目 ${project}${title ? ` · ${title}` : ""}`, oneLine(first?.question ?? env.prompt, 200)]
-      .filter(Boolean)
-      .join("\n")
-    return { type: "now", notification: { kind: "critical", title: `OpenCode: 需要你回答 [${code}]`, body, sessionId: code, event } }
+    const question = oneLine(first?.question ?? env.prompt, 200)
+    const body = [`项目 ${project}${title ? ` · ${title}` : ""}`, question].filter(Boolean).join("\n")
+    return {
+      type: "now",
+      notification: { kind: "critical", title: `OpenCode: 需要你回答 [${code}]`, body, sessionId: code, event, vars: { code, project, title, question, taskTitle: "", sessionId: sid, eventLabel: EVENT_LABELS.questionAsked } },
+    }
   }
 
   return { type: "silent" }

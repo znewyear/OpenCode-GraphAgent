@@ -6,7 +6,7 @@
 
 | hook 事件 | 行为 |
 |---|---|
-| `UserPromptSubmit` | 静默计时：写 `state/prompt-<sid>.json` 时间戳 |
+| `UserPromptSubmit` | 静默计时：写 `state/prompt-<sid>.json` 的 `{ts, prompt}`（prompt 单行化后作任务标题，供 Stop/钉钉结构化渲染；旧格式 `{ts}` 文件降级为空标题） |
 | `Stop`（会话有待测时间戳 = 主会话） | 立即通知 `OpenCode: 回合完成 [短码]`，正文含耗时 + 摘要 |
 | `Stop`（无时间戳 = DAG 子会话） | 进入聚合缓冲，窗口（默认 10s）关闭后 1 条 digest `OpenCode: N 个并行回合完成` |
 | `StopFailure` | critical，立即通知，**豁免一切节流/聚合** |
@@ -29,16 +29,16 @@ cp hooks.example.json ../../../.opencode/hooks.json
 # 不要整文件覆盖 —— specgit init 会重写该文件，重跑 init 后需重新合并（verify.ts A12 可自检）。
 
 # 2. 配置两级化（JSONC，支持注释；真实凭据绝不提交）
-#    全局（对所有项目生效，本机启用）：
-cp ../../../.opencode/notify.jsonc.example ~/.config/opencodeg/notify.jsonc   # 按需编辑
-#    项目级覆盖（可选，只写需要覆盖的字段）：
-cp ../../../.opencode/notify.jsonc.example ../../../.opencode/notify.jsonc   # 已被 gitignore
+#    全局（对所有项目生效，本机启用；旧路径 ~/.config/opencodeg/notify.jsonc 仍兼容读取）：
+mkdir -p ~/.config/opencodeg/notify && cp ../../../.opencode/notify.jsonc.example ~/.config/opencodeg/notify/notify.jsonc   # 按需编辑
+#    项目级覆盖（可选，只写需要覆盖的字段；旧路径 .opencode/notify.jsonc 仍兼容读取）：
+mkdir -p ../../../.opencode/notify && cp ../../../.opencode/notify.jsonc.example ../../../.opencode/notify/notify.jsonc   # 已被 gitignore
 #    或沿用旧版本地文件 notify.config.json（deprecated 兜底层，仍可用）：
 cp notify.config.json.example notify.config.json
 #    env（NOTIFY_DINGTALK_WEBHOOK 等）始终最高优先；见下
 
 # 3. 行为验收（离线，无真实 webhook 流量，无真实 powershell spawn）
-bun verify.ts   # 20/20 passed
+bun verify.ts   # 27/27 passed
 
 # 4. 本机冒烟（L1，真实 toast，需 Win10 桌面可见）
 echo '{"hook_event_name":"UserPromptSubmit","session_id":"ses_l1smoke01","prompt":"smoke"}' | bun dispatcher.ts
@@ -48,7 +48,9 @@ echo '{"hook_event_name":"Stop","session_id":"ses_l1smoke01","stop_hook_active":
 
 ## 配置
 
-优先级 **env > 项目 `<cwd>/.opencode/notify.jsonc` > 全局 `~/.config/opencodeg/notify.jsonc` > 旧版 `notify.config.json`（deprecated）> 编译默认**。`NOTIFY_CONFIG`（或测试用 opts.configPath）设定时整链替换为该单文件。文件层之间按字段覆盖（channels 按渠道逐字段深合并，开关与凭据均可两级）；数组整体替换。两级新层均为 JSONC（字符串感知的注释剥离，解析失败静默回落低层）。dispatcher 从 hook envelope 的 `cwd` 定位项目层。
+优先级 **env > 项目 `<cwd>/.opencode/notify/notify.jsonc`（旧路径 `<cwd>/.opencode/notify.jsonc` 兼容读取，新路径优先）> 全局 `~/.config/opencodeg/notify/notify.jsonc`（旧路径 `~/.config/opencodeg/notify.jsonc` 兼容）> 旧版 `notify.config.json`（deprecated）> 编译默认**。`NOTIFY_CONFIG`（或测试用 opts.configPath）设定时整链替换为该单文件。文件层之间按字段覆盖（channels 按渠道逐字段深合并，开关与凭据均可两级）；数组整体替换。两级新层均为 JSONC（字符串感知的注释剥离，解析失败静默回落低层）。dispatcher 从 hook envelope 的 `cwd` 定位项目层。
+
+**事件级开关与消息模板**（`events` 节，均可省略，`enabled` 默认 true）：`stop` / `stopFailure` / `permissionRequest` / `notification` / `questionAsked` / `digest` 六个事件可独立开关（`events.<key>.enabled: false` 整事件静默）；每事件可配 `template`，渠道可再覆盖 `channels.<id>.template`。模板为 `.txt` 纯文本：首行=标题、其余=正文，`{var}` 占位符（空值替换为空串），渲染后连续空行合并、首尾 trim。模板文件查找顺序：项目 `<cwd>/.opencode/notify/templates/` > 全局 `~/.config/opencodeg/notify/templates/` > 模块默认 `templates/`（本目录）> 编译硬编码文案（默认路径，用户可见外观与历史完全一致）。变量表：六事件通用 `{taskTitle}{sessionId}{eventLabel}{project}`（任务标题=单行化 prompt，仅 Stop/StopFailure 有值；完整会话 ID；事件类型明文；项目名。digest 恒空 taskTitle 且无 project）；stop 另有 `{code}{duration}{summary}`、stopFailure `{code}{error}`、permissionRequest `{code}{tool}{input}`、notification `{code}{message}`、questionAsked `{code}{project}{title}{question}`、digest `{count}{sessions}`（`{sessions}` 为完整 ID 逗号列表，最多 6 个，超出以 `…` 结尾）。
 
 | env | 作用 |
 |---|---|
@@ -60,6 +62,19 @@ echo '{"hook_event_name":"Stop","session_id":"ses_l1smoke01","stop_hook_active":
 | `NOTIFY_STOP_MODE` | `auto`（默认）/ `all-immediate` / `all-digest` |
 
 渠道实际启用 = `notify.config.json 里 channels.<id>.enabled` **且** 凭据齐全 **且** 不在 `NOTIFY_DISABLE`。钉钉/飞书开关默认 true 但凭据为空即禁用——开箱仅 toast。
+
+**钉钉结构化渲染**：通知 vars 带 `eventLabel`（format/dispatcher 产出的所有通知）时，钉钉 markdown 按「标题行 / `---` 分割线 / 描述」三段式渲染：标题 = 项目名 + 会话 id + 通知类型（digest 无单一会话，退化为「类型 (数量)」），分割线下首行为任务标题（digest 补会话全 ID 列表行），其后为描述正文；不用表格/加粗字段标记（钉钉消息内不兼容）。vars 缺 `eventLabel`（历史调用方直接构造的通知）降级为原 title+body 整段渲染，字节不变。自定义 `keyword` 未命中渲染文本时仍自动前置。
+
+### 钉钉推送到自己（单人群）
+
+钉钉没有「个人单聊」的开放 webhook 推送；现有 `dingtalk` 渠道是**群自定义机器人**（webhook + 加签），落点是群聊。要把通知发给自己，最简做法是建一个**只有你和机器人的单人群**——复用同一套 webhook + 加签，无需任何新代码：
+
+1. 钉钉 App → 右上 `+` → 发起群聊 → 建一个只含你自己的群（可先拉任一好友建群后将其移出，或面对面建群只进自己）。
+2. 群设置 → 智能群助手/机器人 → 添加机器人 → **自定义机器人**（通过 Webhook 接入）。
+3. 安全设置选 **加签**，复制 `SEC` 开头的 secret；完成时复制 webhook（`https://oapi.dingtalk.com/robot/send?access_token=…`）。
+4. 填入配置：`channels.dingtalk.webhook` / `secret`（`keyword` 加签方式下可选，留空即可）；或在 env 填 `NOTIFY_DINGTALK_WEBHOOK` / `NOTIFY_DINGTALK_SECRET`。
+
+此后通知落到这个单人群，体验等同「推给自己」。secret 走本地配置，不入库（见「安全」）。
 
 关键 json 键：`aggregate.windowMs`（聚合窗口，默认 10000）、`stopMode`、`durationMinMs`（耗时低于阈值则省略耗时行，默认 0=总是显示）、`channels["windows-toast"].timeoutMs`（powershell 超时，默认 8000）。
 
@@ -89,13 +104,13 @@ echo '{"hook_event_name":"Stop","session_id":"ses_l1smoke01","stop_hook_active":
 
 ## 交付指纹
 
-交付清单共 17 个文件（含防 secret 的 `.gitignore`）。内容指纹对除本 README 外的 16 个交付文件逐文件 sha256 后整体再 sha256（README 是指纹值的载体，不自哈希）。复现命令（在仓库根执行一行）：
+交付清单共 24 个文件（含防 secret 的 `.gitignore`、6 个默认模板 `templates/*.txt` 与模板/开关指南 `notify.md`）。内容指纹对除本 README 外的 23 个交付文件逐文件 sha256 后整体再 sha256（README 是指纹值的载体，不自哈希）。复现命令（在仓库根执行一行）：
 
 `git ls-files --cached --others --exclude-standard .opencode/hooks/notify ':(exclude).opencode/hooks/notify/README.md' | LC_ALL=C sort | xargs -r sha256sum | sha256sum`
 
 `sort` 段钉 `LC_ALL=C`：文件顺序与 locale 无关，指纹跨机可复现。
 
-当前值 `sha256:fba86d843a4e5cd490d5912d9cb4536def7fe470b5692586f6f95801f3ed12b5`。交付文件任何变动后须重算并更新本节；`bun verify.ts` A15 持续自检（含 LC_ALL=C 钉扎校验）。项目级模板 `.opencode/notify.jsonc.example` 在本目录之外，不进指纹/A11 清单。
+当前值 `sha256:48953359f3f962c3b5cf6205b8c669f40ca134c74fdcdae4cd2999de4ebce398`。交付文件任何变动后须重算并更新本节；`bun verify.ts` A15 持续自检（含 LC_ALL=C 钉扎校验）。项目级模板 `.opencode/notify.jsonc.example` 在本目录之外，不进指纹/A11 清单。
 
 ## 扩展渠道
 

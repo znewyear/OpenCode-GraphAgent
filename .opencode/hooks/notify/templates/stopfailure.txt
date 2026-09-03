@@ -1,0 +1,2 @@
+OpenCode: 回合失败 [{code}]
+错误: {error}

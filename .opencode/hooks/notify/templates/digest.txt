@@ -1,0 +1,2 @@
+OpenCode: {count} 个并行回合完成
+会话: {sessions}

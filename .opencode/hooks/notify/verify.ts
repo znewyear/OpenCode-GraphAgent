@@ -9,6 +9,7 @@ import os from "node:os"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
 import { dispatch, type DispatchDeps } from "./dispatcher"
+import { EVENT_LABELS } from "./format"
 import { fileLog, resolveConfig } from "./config"
 import { dingtalkChannel } from "./channels/dingtalk"
 import { feishuChannel } from "./channels/feishu"
@@ -218,7 +219,7 @@ scenarios.push([
     if (seen.length !== 1) throw new Error(`expected 1 request, got ${seen.length}`)
     const expectedUrl = `https://oapi.dingtalk.com/robot/send?access_token=TESTTOKEN&timestamp=${VEC_MS}&sign=${DINGTALK_SIGN_URLENC}`
     if (seen[0].url !== expectedUrl) throw new Error(`url: ${seen[0].url}`)
-    if (JSON.stringify(seen[0].body) !== JSON.stringify({ msgtype: "text", text: { content: "OpenCode: 回合完成 [222222]\n耗时 3m12s\n已完成" } }))
+    if (JSON.stringify(seen[0].body) !== JSON.stringify({ msgtype: "markdown", markdown: { title: "OpenCode: 回合完成 [222222]", text: "**OpenCode: 回合完成 [222222]**\n\n耗时 3m12s\n\n已完成" } }))
       throw new Error(`body: ${JSON.stringify(seen[0].body)}`)
   },
 ])
@@ -446,15 +447,15 @@ scenarios.push([
 ])
 
 // A13 (F1): the scoped .gitignore itself must be committable — fresh clones need the
-// anti-secret rules — while the real secrets stay check-ignored.
+// anti-secret rules — while the real secrets stay check-ignored. Committable =
+// tracked or untracked-but-not-ignored (ls-files); `git add -n` only lists files
+// needing update, so it stopped listing the file once it was committed.
 scenarios.push([
-  "A13 gitignore deliverable: add list includes rule file, secrets still ignored",
+  "A13 gitignore deliverable: tracked/unignored rule file, secrets still ignored",
   async () => {
-    const dry = spawnSync("git", ["-C", REPO_ROOT, "add", "-n", ".opencode/hooks/notify/"])
-    if (dry.status !== 0) throw new Error(`git add -n failed: ${dry.stderr}`)
-    const listed = dry.stdout.toString()
-    if (!listed.includes(".opencode/hooks/notify/.gitignore"))
-      throw new Error(`scoped .gitignore not committable (bare .gitignore pattern in .opencode/.gitignore?):\n${listed}`)
+    const ls0 = spawnSync("git", ["-C", REPO_ROOT, "ls-files", "--cached", "--others", "--exclude-standard", ".opencode/hooks/notify/.gitignore"])
+    if (ls0.status !== 0) throw new Error(`ls-files failed: ${ls0.stderr}`)
+    if (!ls0.stdout.toString().trim()) throw new Error(`scoped .gitignore neither tracked nor committable (ignored by a parent rule?)`)
     for (const p of [".opencode/hooks/notify/notify.config.json", ".opencode/hooks/notify/state/prompt-x.json", ".opencode/hooks/notify/logs/dispatcher.log"]) {
       if (spawnSync("git", ["-C", REPO_ROOT, "check-ignore", "-q", p]).status !== 0) throw new Error(`secret no longer ignored: ${p}`)
     }
@@ -616,6 +617,349 @@ scenarios.push([
     deps3.now = () => 2000
     await dispatch(envOf("QuestionAsked", "ses_main_666666", { questions: [{ question: "q3", header: "h3" }] }), deps3)
     if (calls3.length !== 2) throw new Error(`plain Notification must not suppress QuestionAsked, got ${calls3.length}`)
+  },
+])
+
+// A18: event-level switches + per-channel template rendering. Template files are
+// plain .txt (first line = title, rest = body) resolved in order project >
+// global > module-default dirs; channel template beats event template; a
+// disabled event (incl. digest) silences dispatch entirely. No template
+// configured → compiled hardcoded copy (covered by A2/A3/A4/A17).
+scenarios.push([
+  "A18 event switches + template resolution/rendering",
+  async () => {
+    const dir = tmpState()
+    const projTpl = path.join(dir, "proj-templates")
+    const globalTpl = path.join(dir, "global-templates")
+    mkdirSync(projTpl, { recursive: true })
+    mkdirSync(globalTpl, { recursive: true })
+    writeFileSync(path.join(projTpl, "stop.txt"), "PROJ {code}\n{summary}\n\n\n尾部 {code}\n\n")
+    writeFileSync(path.join(globalTpl, "stop.txt"), "GLOBAL {code}\n{summary}") // must lose to project layer
+    writeFileSync(path.join(globalTpl, "cap-stop.txt"), "CAP[{code}]\n耗时 {duration}\n{missing}")
+    const cfgFile = path.join(dir, "events.jsonc")
+    writeFileSync(
+      cfgFile,
+      JSON.stringify({
+        events: {
+          stop: { template: "stop.txt", channels: { cap: { template: "cap-stop.txt" } } },
+          digest: { enabled: false },
+        },
+      }),
+    )
+    const cfg = resolveConfig({ NOTIFY_CONFIG: cfgFile }, { stateDir: dir, globalTemplatesDir: globalTpl, projectTemplatesDir: projTpl })
+    const cap = fakeChannel("cap") // channel-level template (file only in global layer)
+    const cap2 = fakeChannel("cap2") // event-level template (project layer wins over global)
+    const deps: DispatchDeps = { ...baseDeps(), cfg, channels: [cap.ch, cap2.ch], stateDir: dir, now: () => 1000 }
+    await dispatch(envOf("UserPromptSubmit", "ses_main_121212", { prompt: "hi" }), deps)
+    deps.now = () => 1000 + 192000
+    await dispatch(envOf("Stop", "ses_main_121212", { stop_hook_active: false, last_assistant_message: "模板渲染摘要" }), deps)
+    if (cap2.calls.length !== 1) throw new Error(`event-template channel calls: ${cap2.calls.length}`)
+    if (cap2.calls[0].title !== "PROJ 121212") throw new Error(`event template title: ${cap2.calls[0].title}`)
+    if (cap2.calls[0].body !== "模板渲染摘要\n\n尾部 121212") throw new Error(`blank-line collapse: ${JSON.stringify(cap2.calls[0].body)}`)
+    if (cap.calls.length !== 1) throw new Error(`channel-template channel calls: ${cap.calls.length}`)
+    if (cap.calls[0].title !== "CAP[121212]") throw new Error(`channel template title: ${cap.calls[0].title}`)
+    if (cap.calls[0].body !== "耗时 3m12s") throw new Error(`channel template body: ${JSON.stringify(cap.calls[0].body)}`)
+
+    // events.stop.enabled=false → dispatch silences Stop (timing stamp still recorded)
+    const offCfgFile = path.join(dir, "off.jsonc")
+    writeFileSync(offCfgFile, JSON.stringify({ events: { stop: { enabled: false } } }))
+    const dir2 = tmpState()
+    const off = fakeChannel("cap")
+    const offDeps: DispatchDeps = {
+      ...baseDeps(),
+      cfg: resolveConfig({ NOTIFY_CONFIG: offCfgFile }, { stateDir: dir2 }),
+      channels: [off.ch],
+      stateDir: dir2,
+      now: () => 1000,
+    }
+    await dispatch(envOf("UserPromptSubmit", "ses_main_131313", { prompt: "x" }), offDeps)
+    offDeps.now = () => 193000
+    await dispatch(envOf("Stop", "ses_main_131313", { stop_hook_active: false }), offDeps)
+    if (off.calls.length !== 0) throw new Error(`disabled stop still notified: ${off.calls.map((c) => c.title).join(",")}`)
+
+    // events.digest.enabled=false → buffered Stops flush to nothing
+    const digestCfg = resolveConfig({ NOTIFY_CONFIG: cfgFile }, { stateDir: dir2, globalTemplatesDir: globalTpl, projectTemplatesDir: projTpl })
+    digestCfg.aggregate.windowMs = 1
+    const dir3 = tmpState()
+    const dig = fakeChannel("cap")
+    const digDeps: DispatchDeps = { ...baseDeps(), cfg: digestCfg, channels: [dig.ch], stateDir: dir3, now: () => Date.now(), sleep: realSleep }
+    await Promise.all(["ses_sub_300001", "ses_sub_300002"].map((sid) => dispatch(envOf("Stop", sid, { stop_hook_active: false }), digDeps)))
+    if (dig.calls.length !== 0) throw new Error(`disabled digest still flushed: ${dig.calls.map((c) => c.title).join(",")}`)
+  },
+])
+
+// A19: template spec that cannot be satisfied → compiled hardcoded copy (the A2/A3/A4/A17
+// literals). Two distinct fallback branches in the render pipeline: (1) spec names a file
+// no layer has → resolveTemplateFile returns undefined → renderedCopy returns the
+// notification untouched (registry.ts "file === undefined" path); (2) absolute spec that
+// exists but is not a readable file (a directory) → readFileSync throws → the registry.ts
+// catch logs "unreadable, using default copy" and returns the default. Both must be
+// byte-identical (===) to the template-less baseline dispatch of the same envelope.
+scenarios.push([
+  "A19 missing/unreadable template → compiled hardcoded copy",
+  async () => {
+    const dir = tmpState()
+    const summary = "模板缺失回退硬编码文案验证"
+    const run = async (cfgFile: string, logs: string[]) => {
+      const { ch, calls } = fakeChannel("cap")
+      const deps: DispatchDeps = {
+        ...baseDeps(),
+        cfg: resolveConfig({ NOTIFY_CONFIG: cfgFile }, { stateDir: dir }),
+        channels: [ch],
+        stateDir: dir,
+        now: () => 1000,
+        log: (l) => logs.push(l),
+      }
+      await dispatch(envOf("UserPromptSubmit", "ses_main_191919", { prompt: "hi" }), deps)
+      deps.now = () => 1000 + 192000
+      await dispatch(envOf("Stop", "ses_main_191919", { stop_hook_active: false, last_assistant_message: summary }), deps)
+      return calls
+    }
+    const baseLogs: string[] = []
+    const base = await run(noConfig(dir), baseLogs)
+    if (base.length !== 1) throw new Error(`baseline calls: ${base.length}`)
+    if (base[0].title !== "OpenCode: 回合完成 [191919]") throw new Error(`baseline title: ${base[0].title}`)
+    if (base[0].body !== `耗时 3m12s\n${summary}`) throw new Error(`baseline body: ${base[0].body}`)
+
+    // (1) spec hits no layer (project > global > module-default all miss) → silent fallback
+    const missCfg = path.join(dir, "missing-template.jsonc")
+    writeFileSync(missCfg, JSON.stringify({ events: { stop: { template: "no-such-template.txt" } } }))
+    const missLogs: string[] = []
+    const miss = await run(missCfg, missLogs)
+    if (miss.length !== 1) throw new Error(`missing-template calls: ${miss.length}`)
+    if (miss[0].title !== base[0].title || miss[0].body !== base[0].body) throw new Error(`missing-template copy diverged: ${JSON.stringify(miss[0])}`)
+    if (missLogs.some((l) => l.includes("unreadable"))) throw new Error(`unresolvable spec must take the undefined path, not the catch path: ${missLogs.join(",")}`)
+
+    // (2) absolute spec that exists but is a directory → readFileSync throws → catch path + log
+    const notAFile = path.join(dir, "not-a-file")
+    mkdirSync(notAFile)
+    const unreadCfg = path.join(dir, "unreadable-template.jsonc")
+    writeFileSync(unreadCfg, JSON.stringify({ events: { stop: { template: notAFile } } }))
+    const unreadLogs: string[] = []
+    const unread = await run(unreadCfg, unreadLogs)
+    if (unread.length !== 1) throw new Error(`unreadable-template calls: ${unread.length}`)
+    if (unread[0].title !== base[0].title || unread[0].body !== base[0].body) throw new Error(`unreadable-template copy diverged: ${JSON.stringify(unread[0])}`)
+    if (!unreadLogs.some((l) => l.includes("unreadable, using default copy"))) throw new Error(`catch-path fallback not logged: ${unreadLogs.join(",")}`)
+  },
+])
+
+// A20: new-structure config paths positive read — the resolveConfig candidate table must
+// pick <cwd>/.opencode/notify/notify.jsonc (project) and ~/.config/opencodeg/notify/
+// notify.jsonc (global) FIRST, with the legacy flat notify.jsonc files still serving when
+// the new file is absent (an upgrade never drops config, and old files never shadow new
+// ones). Global default-path derivation is exercised hermetically by faking os.homedir
+// (restored in finally). Every asserted key is explicitly set in the layer that must win,
+// so the developer's real local/deprecated files cannot perturb the outcome.
+scenarios.push([
+  "A20 new-structure notify/notify.jsonc read: project + global + legacy fallback",
+  async () => {
+    const dir = tmpState()
+    const fakeHome = path.join(dir, "fake-home")
+    const globalNew = path.join(fakeHome, ".config", "opencodeg", "notify", "notify.jsonc")
+    mkdirSync(path.dirname(globalNew), { recursive: true })
+    writeFileSync(globalNew, `// 全局新结构（注释须被剥离）\n{ "channels": { "dingtalk": { "webhook": "https://newglobal.example/hook?access_token=GN", "secret": "gn-sec" } }, "aggregate": { "windowMs": 2600 } }\n`)
+    writeFileSync(path.join(fakeHome, ".config", "opencodeg", "notify.jsonc"), `{ "channels": { "dingtalk": { "webhook": "https://oldglobal.example/hook?access_token=OG" } }, "aggregate": { "windowMs": 2900 } }\n`)
+
+    const realHomedir = os.homedir
+    os.homedir = () => fakeHome
+    try {
+      // global layer alone (cwd without any project file)
+      const bareProj = path.join(dir, "bare-proj")
+      mkdirSync(bareProj)
+      const g = resolveConfig({}, { cwd: bareProj, stateDir: dir })
+      if (g.channels.dingtalk.webhook !== "https://newglobal.example/hook?access_token=GN") throw new Error(`global notify/notify.jsonc not read: ${g.channels.dingtalk.webhook}`)
+      if (g.channels.dingtalk.secret !== "gn-sec") throw new Error("global new-structure secret not applied")
+      if (g.aggregate.windowMs !== 2600) throw new Error(`legacy global must lose the candidate race: ${g.aggregate.windowMs}`)
+      if (g.globalTemplatesDir !== path.join(fakeHome, ".config", "opencodeg", "notify", "templates")) throw new Error(`globalTemplatesDir derivation: ${g.globalTemplatesDir}`)
+
+      // project layer: new structure wins over legacy flat; global inherited below it
+      const projRoot = path.join(dir, "proj")
+      const projNew = path.join(projRoot, ".opencode", "notify", "notify.jsonc")
+      mkdirSync(path.dirname(projNew), { recursive: true })
+      writeFileSync(projNew, `// 项目新结构\n{ "channels": { "dingtalk": { "webhook": "https://newproj.example/hook?access_token=NP", "secret": "np-sec" } }, "events": { "stop": { "template": "proj-stop.txt" } } }\n`)
+      writeFileSync(path.join(projRoot, ".opencode", "notify.jsonc"), `{ "channels": { "dingtalk": { "webhook": "https://oldproj.example/hook?access_token=OP" } }, "events": { "stop": { "template": "legacy-stop.txt" } } }\n`)
+      const p = resolveConfig({}, { cwd: projRoot, stateDir: dir })
+      if (p.channels.dingtalk.webhook !== "https://newproj.example/hook?access_token=NP") throw new Error(`project notify/notify.jsonc not preferred: ${p.channels.dingtalk.webhook}`)
+      if (p.channels.dingtalk.secret !== "np-sec") throw new Error("project new-structure secret not applied")
+      if (p.events.stop.template !== "proj-stop.txt") throw new Error(`events parsed from the wrong layer: ${p.events.stop.template}`)
+      if (p.aggregate.windowMs !== 2600) throw new Error(`global new-structure not inherited: ${p.aggregate.windowMs}`)
+      if (p.projectTemplatesDir !== path.join(projRoot, ".opencode", "notify", "templates")) throw new Error(`projectTemplatesDir derivation: ${p.projectTemplatesDir}`)
+
+      // legacy fallback: new file absent → flat notify.jsonc still serves
+      const legacyProj = path.join(dir, "legacy-proj")
+      mkdirSync(path.join(legacyProj, ".opencode"), { recursive: true })
+      writeFileSync(path.join(legacyProj, ".opencode", "notify.jsonc"), `{ "channels": { "dingtalk": { "webhook": "https://legacyproj.example/hook?access_token=LP" } }, "events": { "stop": { "template": "legacy-stop.txt" } } }\n`)
+      const legacy = resolveConfig({}, { cwd: legacyProj, stateDir: dir })
+      if (legacy.channels.dingtalk.webhook !== "https://legacyproj.example/hook?access_token=LP") throw new Error(`legacy project fallback not read: ${legacy.channels.dingtalk.webhook}`)
+      if (legacy.channels.dingtalk.secret !== "gn-sec") throw new Error("legacy project layer must still inherit global secret")
+      if (legacy.events.stop.template !== "legacy-stop.txt") throw new Error(`legacy events fallback: ${legacy.events.stop.template}`)
+    } finally {
+      os.homedir = realHomedir
+    }
+  },
+])
+
+// A21 (structured vars): UserPromptSubmit prompt persists as the Stop/StopFailure
+// task title (oneLine'd); full sessionId + zh eventLabel + project ride vars;
+// a legacy {ts}-only stamp file degrades prompt to "".
+scenarios.push([
+  "A21 prompt→taskTitle flow + full sessionId/eventLabel vars",
+  async () => {
+    const dir = tmpState()
+    const { ch, calls } = fakeChannel("cap")
+    const deps = { ...baseDeps({ stateDir: dir, channels: [ch] }), now: () => 1000 }
+    await dispatch(envOf("UserPromptSubmit", "ses_main_211111", { prompt: "  重构认证模块\n并补齐测试  " }), deps)
+    deps.now = () => 1000 + 192000
+    await dispatch(envOf("Stop", "ses_main_211111", { stop_hook_active: false, last_assistant_message: "完成" }), deps)
+    if (calls.length !== 1) throw new Error(`expected 1 call, got ${calls.length}`)
+    const stop = calls[0]
+    if (stop.vars?.taskTitle !== "重构认证模块 并补齐测试") throw new Error(`taskTitle: ${stop.vars?.taskTitle}`)
+    if (stop.vars?.sessionId !== "ses_main_211111") throw new Error(`sessionId: ${stop.vars?.sessionId}`)
+    if (stop.vars?.eventLabel !== "回合完成") throw new Error(`eventLabel: ${stop.vars?.eventLabel}`)
+    if (stop.vars?.project !== "OpenCode-GraphAgent") throw new Error(`project: ${stop.vars?.project}`)
+
+    // StopFailure consumes the same stamp → taskTitle flows; no stamp → ""
+    await dispatch(envOf("UserPromptSubmit", "ses_main_232323", { prompt: "修登录超时" }), deps)
+    deps.now = () => 1000 + 200000
+    await dispatch(envOf("StopFailure", "ses_main_232323", { stop_hook_active: false, error: "provider 502" }), deps)
+    const fail = calls[1]
+    if (fail.vars?.taskTitle !== "修登录超时") throw new Error(`stopFailure taskTitle: ${fail.vars?.taskTitle}`)
+    if (fail.vars?.sessionId !== "ses_main_232323") throw new Error(`stopFailure sessionId: ${fail.vars?.sessionId}`)
+    if (fail.vars?.eventLabel !== "回合失败") throw new Error(`stopFailure eventLabel: ${fail.vars?.eventLabel}`)
+    await dispatch(envOf("StopFailure", "ses_main_242424", { stop_hook_active: false, error: "x" }), deps)
+    if (calls[2].vars?.taskTitle !== "") throw new Error(`stampless taskTitle: ${calls[2].vars?.taskTitle}`)
+
+    // legacy {ts}-only stamp (pre-upgrade file) → prompt degrades to "", ts still serves duration
+    writeFileSync(path.join(dir, "prompt-ses_main_252525.json"), JSON.stringify({ ts: 1000 + 300000 }))
+    deps.now = () => 1000 + 492000
+    await dispatch(envOf("Stop", "ses_main_252525", { stop_hook_active: false, last_assistant_message: "旧格式" }), deps)
+    const legacy = calls[3]
+    if (legacy.vars?.taskTitle !== "") throw new Error(`legacy taskTitle: ${legacy.vars?.taskTitle}`)
+    if (!legacy.body.includes("3m12s")) throw new Error(`legacy duration lost: ${legacy.body}`)
+  },
+])
+
+// A22 (event label map): the six-value plaintext mapping is exactly the
+// documented table; PermissionRequest/Notification/QuestionAsked vars carry
+// full sessionId + their label + project (+ empty taskTitle).
+scenarios.push([
+  "A22 event label map (6 values) + vars on remaining branches",
+  async () => {
+    const want = { stop: "回合完成", stopFailure: "回合失败", permissionRequest: "需要你批准", notification: "通知", questionAsked: "需要你回答", digest: "并行回合完成" }
+    if (JSON.stringify(EVENT_LABELS) !== JSON.stringify(want)) throw new Error(`EVENT_LABELS: ${JSON.stringify(EVENT_LABELS)}`)
+    const dir = tmpState()
+    const { ch, calls } = fakeChannel("cap")
+    const deps = { ...baseDeps({ stateDir: dir, channels: [ch] }), now: () => 1000 }
+    await dispatch(envOf("PermissionRequest", "ses_main_262626", { tool_name: "Bash", tool_input: { command: "ls" } }), deps)
+    // 推进时钟越过 PermissionRequest 的 8s 抑制窗（A5 行为），Notification 才不被吞
+    deps.now = () => 9001
+    await dispatch(envOf("Notification", "ses_main_272727", { message: "等待输入" }), deps)
+    await dispatch(envOf("QuestionAsked", "ses_main_282828", { title: "t", questions: [{ question: "q", header: "h" }] }), deps)
+    const [perm, noti, qa] = calls
+    if (perm.vars?.eventLabel !== "需要你批准" || perm.vars?.sessionId !== "ses_main_262626" || perm.vars?.project !== "OpenCode-GraphAgent" || perm.vars?.taskTitle !== "")
+      throw new Error(`permissionRequest vars: ${JSON.stringify(perm.vars)}`)
+    if (noti.vars?.eventLabel !== "通知" || noti.vars?.sessionId !== "ses_main_272727") throw new Error(`notification vars: ${JSON.stringify(noti.vars)}`)
+    if (qa.vars?.eventLabel !== "需要你回答" || qa.vars?.sessionId !== "ses_main_282828") throw new Error(`questionAsked vars: ${JSON.stringify(qa.vars)}`)
+  },
+])
+
+// A23 (digest structured vars): digest vars carry taskTitle "" and the FULL
+// session id list; the compiled body keeps short codes for compact channels.
+scenarios.push([
+  "A23 digest vars: empty taskTitle, full-ID sessions",
+  async () => {
+    const dir = tmpState()
+    const { ch, calls } = fakeChannel("cap")
+    const cfg = resolveConfig({ NOTIFY_CONFIG: noConfig(dir) }, { stateDir: dir })
+    cfg.aggregate.windowMs = 150
+    const deps: DispatchDeps = { ...baseDeps(), cfg, channels: [ch], stateDir: dir, now: () => Date.now(), sleep: realSleep }
+    await Promise.all(["ses_sub_510001", "ses_sub_510002"].map((sid) => dispatch(envOf("Stop", sid, { stop_hook_active: false }), deps)))
+    if (calls.length !== 1) throw new Error(`expected 1 digest, got ${calls.length}`)
+    const n = calls[0]
+    if (n.vars?.taskTitle !== "") throw new Error(`digest taskTitle: ${JSON.stringify(n.vars?.taskTitle)}`)
+    if (n.vars?.sessions !== "ses_sub_510001,ses_sub_510002") throw new Error(`digest sessions: ${n.vars?.sessions}`)
+    if (n.vars?.eventLabel !== "并行回合完成") throw new Error(`digest eventLabel: ${n.vars?.eventLabel}`)
+    if (!n.body.includes("510001") || !n.body.includes("510002")) throw new Error(`digest body short codes lost: ${n.body}`)
+  },
+])
+
+// A24 (dingtalk structured markdown): eventLabel present → 标题行（项目名 + 会话 id +
+// 通知类型）/ --- 分割线 / 描述（digest 退化为「类型 (数量)」标题 + 会话全 ID 列表行）;
+// custom keyword missing from the message → prefix fallback still hits;
+// vars without eventLabel → legacy title+body bytes (template path unregressed).
+scenarios.push([
+  "A24 dingtalk structured markdown + keyword fallback + legacy fallback",
+  async () => {
+    const seen: Array<{ url: string; body: any }> = []
+    const cfg = resolveConfig(
+      { NOTIFY_CONFIG: noConfig(tmpState()), NOTIFY_DINGTALK_WEBHOOK: "https://oapi.dingtalk.com/robot/send?access_token=TESTTOKEN", NOTIFY_DINGTALK_SECRET: VEC_SECRET },
+      { stateDir: tmpState() },
+    )
+    const ctx = {
+      cfg,
+      fetchImpl: (async (url: any, init: any) => {
+        seen.push({ url: String(url), body: JSON.parse(init.body) })
+        return new Response('{"errcode":0,"errmsg":"ok"}')
+      }) as typeof fetch,
+      spawnImpl: Bun.spawn,
+      now: () => VEC_MS,
+      log: () => {},
+    }
+    await dingtalkChannel.send(
+      {
+        kind: "normal",
+        title: "OpenCode: 回合完成 [222222]",
+        body: "耗时 3m12s\n已完成重构",
+        event: "Stop",
+        vars: { code: "222222", duration: "3m12s", summary: "已完成重构", taskTitle: "重构认证模块", sessionId: "ses_main_222222", eventLabel: "回合完成", project: "OpenCode-GraphAgent" },
+      },
+      ctx,
+    )
+    const md = seen[0].body.markdown
+    if (md.title !== "OpenCode-GraphAgent ses_main_222222 回合完成") throw new Error(`title: ${md.title}`)
+    const expectText = [
+      "**OpenCode-GraphAgent ses_main_222222 回合完成**",
+      "---",
+      "任务: 重构认证模块",
+      "耗时 3m12s",
+      "已完成重构",
+    ].join("\n\n")
+    if (md.text !== expectText) throw new Error(`structured text: ${JSON.stringify(md.text)}`)
+
+    // digest: no single session/project → title degrades to 类型 (数量); the full-ID
+    // sessions list rides below the divider as its own 会话 line
+    seen.length = 0
+    await dingtalkChannel.send(
+      { kind: "digest", title: "OpenCode: 2 个并行回合完成", body: "会话: 510001,510002", event: "Stop", vars: { count: "2", sessions: "ses_sub_510001,ses_sub_510002", taskTitle: "", sessionId: "", eventLabel: "并行回合完成" } },
+      ctx,
+    )
+    const dig = seen[0].body.markdown
+    if (dig.title !== "并行回合完成 (2)") throw new Error(`digest title: ${dig.title}`)
+    // digest 文本无项目名 → 默认关键词兜底前置 "OpenCode"
+    if (!dig.text.endsWith("**并行回合完成 (2)**\n\n---\n\n会话: ses_sub_510001,ses_sub_510002\n\n会话: 510001,510002")) throw new Error(`digest text: ${JSON.stringify(dig.text)}`)
+
+    // custom keyword absent from the message → prefix fallback still prepends
+    const dir = tmpState()
+    const kwCfgFile = path.join(dir, "kw.jsonc")
+    writeFileSync(kwCfgFile, JSON.stringify({ channels: { dingtalk: { keyword: "专属关键词" } } }))
+    const kwCfg = resolveConfig(
+      { NOTIFY_CONFIG: kwCfgFile, NOTIFY_DINGTALK_WEBHOOK: "https://oapi.dingtalk.com/robot/send?access_token=TESTTOKEN", NOTIFY_DINGTALK_SECRET: VEC_SECRET },
+      { stateDir: dir },
+    )
+    seen.length = 0
+    await dingtalkChannel.send(
+      { kind: "normal", title: "OpenCode: 回合完成 [222222]", body: "耗时 3m12s", event: "Stop", vars: { eventLabel: "回合完成", sessionId: "ses_main_222222" } },
+      { ...ctx, cfg: kwCfg },
+    )
+    if (!seen[0].body.markdown.text.startsWith("专属关键词\n\n")) throw new Error(`keyword fallback missing: ${seen[0].body.markdown.text}`)
+
+    // vars present but eventLabel missing → byte-identical legacy title+body copy
+    seen.length = 0
+    await dingtalkChannel.send(
+      { kind: "normal", title: "OpenCode: 回合完成 [222222]", body: "耗时 3m12s\n已完成", event: "Stop", vars: { code: "222222", duration: "3m12s", summary: "已完成" } },
+      ctx,
+    )
+    if (seen[0].body.markdown.text !== "**OpenCode: 回合完成 [222222]**\n\n耗时 3m12s\n\n已完成") throw new Error(`legacy text: ${JSON.stringify(seen[0].body.markdown.text)}`)
   },
 ])
 

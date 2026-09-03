@@ -1,18 +1,57 @@
 /**
  * Config resolution with strict priority (design §1.4):
- *   env > project <cwd>/.opencode/notify.jsonc > global
- *   ~/.config/opencodeg/notify.jsonc > legacy notify.config.json (deprecated)
+ *   env > project <cwd>/.opencode/notify/notify.jsonc (legacy <cwd>/.opencode/notify.jsonc
+ *   still read as fallback) > global ~/.config/opencodeg/notify/notify.jsonc (legacy
+ *   ~/.config/opencodeg/notify.jsonc fallback) > legacy notify.config.json (deprecated)
  *   > compiled defaults
  * NOTIFY_CONFIG / opts.configPath replaces the whole file chain (legacy single-file mode).
  * New-layer files are JSONC (comments allowed); parse failures degrade to {}.
  * Real config files are gitignored; examples ship placeholders only.
+ * events section: per-event switch + template spec (channel-level beats event-level);
+ * template files resolve against project > global > module-default templates/ dirs.
  */
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { isRecord } from "./lib/guards"
 
 export type StopMode = "auto" | "all-immediate" | "all-digest"
+
+export type EventKey = "stop" | "stopFailure" | "permissionRequest" | "notification" | "questionAsked" | "digest"
+
+export interface EventConfig {
+  enabled: boolean
+  template?: string
+  channels: Record<string, { template?: string }>
+}
+
+export type EventsConfig = Record<EventKey, EventConfig>
+
+const EVENT_KEYS: EventKey[] = ["stop", "stopFailure", "permissionRequest", "notification", "questionAsked", "digest"]
+
+const HOOK_EVENT_KEYS: Record<string, EventKey> = {
+  Stop: "stop",
+  StopFailure: "stopFailure",
+  PermissionRequest: "permissionRequest",
+  Notification: "notification",
+  QuestionAsked: "questionAsked",
+}
+
+/** Hook event name → config events key. UserPromptSubmit is timing-only, never switchable. */
+export function eventKeyOf(hookEvent: string): EventKey | undefined {
+  return HOOK_EVENT_KEYS[hookEvent]
+}
+
+export function defaultEvents(): EventsConfig {
+  return {
+    stop: { enabled: true, channels: {} },
+    stopFailure: { enabled: true, channels: {} },
+    permissionRequest: { enabled: true, channels: {} },
+    notification: { enabled: true, channels: {} },
+    questionAsked: { enabled: true, channels: {} },
+    digest: { enabled: true, channels: {} },
+  }
+}
 
 export interface ResolvedConfig {
   channels: {
@@ -28,6 +67,9 @@ export interface ResolvedConfig {
   stateDir: string
   logDir: string
   disabledChannels: string[]
+  events: EventsConfig
+  globalTemplatesDir: string
+  projectTemplatesDir: string | undefined
 }
 
 const HERE = import.meta.dir
@@ -112,20 +154,65 @@ function toStopMode(v: string): StopMode {
   return v === "all-immediate" || v === "all-digest" || v === "auto" ? v : "auto"
 }
 
+function firstExisting(candidates: string[]): string | undefined {
+  for (const f of candidates) if (existsSync(f)) return f
+  return undefined
+}
+
+/** Per-event deep merge across layers: enabled/template per key, channels per channel id. */
+function parseEvents(layers: Array<Record<string, unknown>>): EventsConfig {
+  const out = defaultEvents()
+  for (const key of EVENT_KEYS) {
+    const evLayers = layers.map((l) => obj(obj(l.events)[key]))
+    const merged = mergeLayers(evLayers)
+    const channels: Record<string, { template?: string }> = {}
+    for (const id of new Set(evLayers.flatMap((l) => Object.keys(obj(l.channels))))) {
+      const template = str(mergeLayers(evLayers.map((l) => obj(obj(l.channels)[id]))).template).trim()
+      channels[id] = template ? { template } : {}
+    }
+    const template = str(merged.template).trim()
+    out[key] = { enabled: bool(merged.enabled, true), ...(template ? { template } : {}), channels }
+  }
+  return out
+}
+
+/**
+ * Template file resolution: channel-level spec beats event-level; filename-only
+ * specs and relative paths resolve against project > global > module-default
+ * (HERE/templates) templates/ dirs, first existing file wins; absolute paths are
+ * used directly. No spec or no file found → undefined → compiled hardcoded copy.
+ */
+export function resolveTemplateFile(key: EventKey, channelId: string, cfg: ResolvedConfig): string | undefined {
+  const ev = cfg.events[key]
+  const spec = (ev.channels[channelId]?.template ?? "").trim() || (ev.template ?? "").trim()
+  if (!spec) return undefined
+  if (path.isAbsolute(spec)) return existsSync(spec) ? spec : undefined
+  for (const dir of [cfg.projectTemplatesDir, cfg.globalTemplatesDir, path.join(HERE, "templates")]) {
+    if (!dir) continue
+    const file = path.join(dir, spec)
+    if (existsSync(file)) return file
+  }
+  return undefined
+}
+
 export function resolveConfig(
   env: Record<string, string | undefined> = process.env,
-  opts: { configPath?: string; globalConfigPath?: string; projectConfigPath?: string; cwd?: string; stateDir?: string; logDir?: string } = {},
+  opts: { configPath?: string; globalConfigPath?: string; projectConfigPath?: string; globalTemplatesDir?: string; projectTemplatesDir?: string; cwd?: string; stateDir?: string; logDir?: string } = {},
 ): ResolvedConfig {
-  // NOTIFY_CONFIG / opts.configPath replaces the whole chain (legacy single-file mode).
-  const globalConfigPath = opts.globalConfigPath ?? path.join(os.homedir(), ".config", "opencodeg", "notify.jsonc")
-  const projectConfigPath = opts.projectConfigPath ?? (opts.cwd ? path.join(opts.cwd, ".opencode", "notify.jsonc") : undefined)
+  // New structure lives in a notify/ directory; legacy flat files stay readable
+  // as fallback (new path first, so an upgrade never silently drops config).
+  const globalConfigDir = path.join(os.homedir(), ".config", "opencodeg", "notify")
+  const globalFile =
+    opts.globalConfigPath ?? firstExisting([path.join(globalConfigDir, "notify.jsonc"), path.join(os.homedir(), ".config", "opencodeg", "notify.jsonc")])
+  const projCandidates = opts.projectConfigPath ? [opts.projectConfigPath] : opts.cwd ? [path.join(opts.cwd, ".opencode", "notify", "notify.jsonc"), path.join(opts.cwd, ".opencode", "notify.jsonc")] : []
+  const projFile = firstExisting(projCandidates)
   const layers =
     opts.configPath ?? env.NOTIFY_CONFIG
       ? [readJson(opts.configPath ?? env.NOTIFY_CONFIG!)]
       : [
           readJson(path.join(HERE, "notify.config.json")), // deprecated local fallback, lowest file layer
-          readJson(globalConfigPath),
-          ...(projectConfigPath ? [readJson(projectConfigPath)] : []), // project overrides global
+          readJson(globalFile ?? path.join(globalConfigDir, "notify.jsonc")),
+          ...(projFile ? [readJson(projFile)] : []), // project overrides global
         ]
   const file = mergeLayers(layers)
   const toast = mergeLayers(layers.map((l) => channelLayer(l, "windows-toast")))
@@ -165,6 +252,9 @@ export function resolveConfig(
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+    events: parseEvents(layers),
+    globalTemplatesDir: opts.globalTemplatesDir ?? path.join(globalConfigDir, "templates"),
+    projectTemplatesDir: opts.projectTemplatesDir ?? (opts.cwd ? path.join(opts.cwd, ".opencode", "notify", "templates") : undefined),
   }
   return cfg
 }

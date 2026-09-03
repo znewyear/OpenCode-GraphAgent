@@ -1,11 +1,14 @@
 // 项目级 notify 配置模板（JSONC，支持注释）。
-// 复制为 <project>/.opencode/notify.jsonc（已 gitignore）后按需覆盖。
-// 优先级：env > 项目 .opencode/notify.jsonc > 全局 ~/.config/opencodeg/notify.jsonc
+// 复制为 <project>/.opencode/notify/notify.jsonc（已 gitignore）后按需覆盖。
+// 优先级：env > 项目 .opencode/notify/notify.jsonc（旧路径 .opencode/notify.jsonc 兼容）
+//        > 全局 ~/.config/opencodeg/notify/notify.jsonc（旧路径 ~/.config/opencodeg/notify.jsonc 兼容）
 //        > 旧版 .opencode/hooks/notify/notify.config.json（废弃兜底）> 编译默认。
 // 只写需要覆盖的字段即可，未写字段继承低层；channels 按渠道逐字段深合并。
 {
   // "channels": {
   //   "dingtalk": { "enabled": true, "webhook": "", "secret": "", "keyword": "OpenCode" },
+  //   // dingtalk 是「群自定义机器人」：想推给自己就建一个只含你和机器人的单人群，
+  //   // 拿该群的 webhook + secret 填入（加签方式下 keyword 可留空）。详见 hooks/notify/README.md「钉钉推送到自己（单人群）」。
   //   "feishu": { "enabled": false, "webhook": "", "secret": "" },
   //   "windows-toast": { "enabled": true, "timeoutMs": 8000 }
   // },
@@ -13,5 +16,19 @@
   // "stopMode": "auto",
   // "durationMinMs": 0,
   // "locale": "zh",
-  // "dryRun": false
+  // "dryRun": false,
+  // 按事件开关与模板（均可省略；enabled 默认 true，template 渠道级覆盖事件级）。
+  // template 为 .txt（首行=标题，其余=正文；{var} 占位符，空值替换为空串），
+  // 文件名/相对路径按 项目 .opencode/notify/templates/ > 全局 ~/.config/opencodeg/notify/templates/
+  // > 模块默认 templates/ 顺序查找；绝对路径直接使用。
+  // 变量: stop{code}{duration}{summary} stopFailure{code}{error} permissionRequest{code}{tool}{input}
+  //       notification{code}{message} questionAsked{code}{project}{title}{question} digest{count}{sessions}
+  // "events": {
+  //   "stop": { "enabled": true, "template": "stop.txt", "channels": { "dingtalk": { "template": "stop-ding.txt" } } },
+  //   "stopFailure": { "enabled": true },
+  //   "permissionRequest": { "enabled": true },
+  //   "notification": { "enabled": true },
+  //   "questionAsked": { "enabled": true },
+  //   "digest": { "enabled": true }
+  // }
 }
